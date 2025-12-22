@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head><title>Generate JAL Icons</title></head>
+<body>
+<h2>JAL Icon Generator</h2>
+<p>Right-click each canvas and "Save Image As" to create the icon files:</p>
+<div style="margin: 20px 0;">
+  <h3>icon16.png</h3>
+  <canvas id="c16" width="16" height="16" style="border: 1px solid #ccc;"></canvas>
+</div>
+<div style="margin: 20px 0;">
+  <h3>icon48.png</h3>
+  <canvas id="c48" width="48" height="48" style="border: 1px solid #ccc;"></canvas>
+</div>
+<div style="margin: 20px 0;">
+  <h3>icon128.png</h3>
+  <canvas id="c128" width="128" height="128" style="border: 1px solid #ccc;"></canvas>
+</div>
+<script>
+function drawIcon(canvas) {
+  var ctx = canvas.getContext('2d');
+  var size = canvas.width;
+  var gradient = ctx.createLinearGradient(0, 0, size, size);
+  gradient.addColorStop(0, '#667eea');
+  gradient.addColorStop(1, '#764ba2');
+
+  // Background circle
+  ctx.beginPath();
+  ctx.arc(size/2, size/2, size/2 - 1, 0, Math.PI * 2);
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  // Letter J
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold ' + (size * 0.6) + 'px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('J', size/2, size/2 + size*0.05);
+}
+
+drawIcon(document.getElementById('c16'));
+drawIcon(document.getElementById('c48'));
+drawIcon(document.getElementById('c128'));
+</script>
+</body>
+</html>

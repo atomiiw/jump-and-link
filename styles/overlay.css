@@ -1,0 +1,578 @@
+/**
+ * JAL - Overlay Styles
+ * Google Docs-like margin comments UI
+ */
+
+/* Reset and base */
+#jal-container,
+#jal-container * {
+  box-sizing: border-box;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+}
+
+/* Main container */
+#jal-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 999999;
+  pointer-events: none;
+}
+
+#jal-container > * {
+  pointer-events: auto;
+}
+
+/* Toggle button - in the right margin */
+.jal-toggle-btn {
+  position: fixed;
+  top: 80px;
+  right: 8px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  font-size: 18px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.jal-toggle-btn:hover {
+  transform: scale(1.1);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.5);
+}
+
+/* Margin comments container - positioned in the right margin area */
+.jal-panel {
+  position: absolute;
+  top: 0;
+  right: 8px;
+  width: 260px;
+  pointer-events: none;
+  z-index: 999998;
+}
+
+.jal-panel.jal-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Floating header toolbar for actions */
+.jal-panel-header {
+  position: fixed;
+  top: 60px;
+  right: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(102, 126, 234, 0.4);
+  z-index: 999999;
+  pointer-events: auto;
+  gap: 8px;
+}
+
+.jal-panel.jal-hidden .jal-panel-header {
+  opacity: 0;
+  transform: translateX(100%);
+  pointer-events: none;
+}
+
+.jal-panel-header h3 {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.jal-panel-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* Margin comment area - no scrolling, comments positioned absolutely */
+.jal-panel-content {
+  position: relative;
+  pointer-events: none;
+}
+
+/* Buttons */
+.jal-btn {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+}
+
+.jal-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.jal-btn-primary {
+  background: white;
+  color: #667eea;
+}
+
+.jal-btn-primary:hover {
+  background: #f0f0f0;
+}
+
+.jal-btn-close {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-size: 16px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.jal-btn-icon {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #999;
+  font-size: 16px;
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.jal-btn-icon:hover {
+  background: #f0f0f0;
+  color: #666;
+}
+
+/* Empty state */
+.jal-empty {
+  position: fixed;
+  top: 120px;
+  right: 20px;
+  text-align: center;
+  color: #999;
+  font-size: 12px;
+  padding: 16px;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  max-width: 240px;
+  pointer-events: auto;
+}
+
+/* Comment cards - positioned absolutely in margin */
+.jal-comment-card {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  background: white;
+  border-radius: 8px;
+  padding: 10px;
+  border-left: 3px solid #667eea;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+  pointer-events: auto;
+  max-width: 260px;
+}
+
+.jal-comment-card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  transform: translateX(-4px);
+}
+
+/* Connector line from comment to highlight */
+.jal-comment-card::before {
+  content: '';
+  position: absolute;
+  left: -20px;
+  top: 12px;
+  width: 17px;
+  height: 2px;
+  background: #667eea;
+}
+
+.jal-comment-card.draft::before {
+  background: #f6ad55;
+}
+
+.jal-comment-card.queued::before {
+  background: #68d391;
+}
+
+.jal-comment-card.sent::before {
+  background: #90cdf4;
+}
+
+.jal-comment-card.draft {
+  border-left-color: #f6ad55;
+}
+
+.jal-comment-card.queued {
+  border-left-color: #68d391;
+}
+
+.jal-comment-card.sent {
+  border-left-color: #90cdf4;
+  opacity: 0.7;
+}
+
+.jal-comment-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.jal-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.jal-checkbox input {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.jal-status-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #e2e8f0;
+  color: #4a5568;
+}
+
+.jal-comment-card.draft .jal-status-badge {
+  background: #feebc8;
+  color: #c05621;
+}
+
+.jal-comment-card.queued .jal-status-badge {
+  background: #c6f6d5;
+  color: #276749;
+}
+
+.jal-comment-card.sent .jal-status-badge {
+  background: #bee3f8;
+  color: #2b6cb0;
+}
+
+.jal-comment-quote {
+  font-size: 12px;
+  font-style: italic;
+  color: #718096;
+  margin-bottom: 8px;
+  padding: 8px;
+  background: white;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.jal-comment-quote:hover {
+  background: #edf2f7;
+}
+
+.jal-comment-body {
+  font-size: 13px;
+  color: #2d3748;
+  line-height: 1.5;
+}
+
+/* Floating button */
+.jal-floating-btn {
+  position: absolute;
+  padding: 6px 12px;
+  background: #667eea;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+  transition: all 0.2s ease;
+  z-index: 1000000;
+}
+
+.jal-floating-btn:hover {
+  background: #5a67d8;
+  transform: scale(1.05);
+}
+
+.jal-floating-btn.jal-hidden {
+  display: none;
+}
+
+/* Comment input */
+.jal-comment-input {
+  position: absolute;
+  width: 280px;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  padding: 12px;
+  z-index: 1000000;
+}
+
+.jal-comment-input.jal-hidden {
+  display: none;
+}
+
+.jal-comment-input textarea {
+  width: 100%;
+  min-height: 80px;
+  padding: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 13px;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.jal-comment-input textarea:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.jal-input-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  justify-content: flex-end;
+}
+
+.jal-input-actions .jal-btn {
+  color: #4a5568;
+  background: #e2e8f0;
+}
+
+.jal-input-actions .jal-btn:hover {
+  background: #cbd5e0;
+}
+
+.jal-input-actions .jal-btn-primary {
+  background: #667eea;
+  color: white;
+}
+
+.jal-input-actions .jal-btn-primary:hover {
+  background: #5a67d8;
+}
+
+/* Highlights - inline mark elements that scroll with content */
+mark.jal-highlight {
+  background: rgba(255, 220, 100, 0.4) !important;
+  border-bottom: 2px solid #f6ad55 !important;
+  cursor: pointer;
+  transition: background 0.2s ease;
+  padding: 0 !important;
+  margin: 0 !important;
+  display: inline !important;
+  color: inherit !important;
+}
+
+mark.jal-highlight:hover {
+  background: rgba(255, 220, 100, 0.6) !important;
+}
+
+mark.jal-highlight.jal-flash {
+  animation: jal-flash 0.5s ease-in-out 3;
+}
+
+/* Active state when comment card is hovered */
+mark.jal-highlight.jal-active {
+  background: rgba(255, 180, 50, 0.6) !important;
+  box-shadow: 0 0 0 2px rgba(255, 180, 50, 0.4);
+}
+
+/* Element highlights - for equations, images, code blocks, etc. */
+.jal-highlight-element {
+  background: rgba(255, 220, 100, 0.4) !important;
+  outline: 2px solid #f6ad55 !important;
+  outline-offset: 2px !important;
+  cursor: pointer;
+  transition: background 0.2s ease, outline 0.2s ease;
+  border-radius: 4px;
+}
+
+.jal-highlight-element:hover {
+  background: rgba(255, 220, 100, 0.6) !important;
+  outline: 2px solid #dd6b20 !important;
+}
+
+.jal-highlight-element.jal-flash {
+  animation: jal-flash-element 0.5s ease-in-out 3;
+}
+
+/* Active state when comment card is hovered */
+.jal-highlight-element.jal-active {
+  background: rgba(255, 180, 50, 0.6) !important;
+  outline: 3px solid #dd6b20 !important;
+}
+
+/* Comment card active state when hovering its highlight */
+.jal-comment-card.jal-active {
+  box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3);
+  transform: translateX(-4px);
+  border-left-width: 4px;
+}
+
+/* Comment card flash animation */
+.jal-comment-card.jal-flash {
+  animation: jal-card-flash 0.4s ease-in-out 3;
+}
+
+@keyframes jal-card-flash {
+  0%, 100% {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
+  50% {
+    box-shadow: 0 4px 24px rgba(102, 126, 234, 0.5);
+    transform: translateX(-6px);
+  }
+}
+
+@keyframes jal-flash {
+  0%, 100% {
+    background: rgba(255, 220, 100, 0.3) !important;
+  }
+  50% {
+    background: rgba(255, 180, 50, 0.6) !important;
+  }
+}
+
+@keyframes jal-flash-element {
+  0%, 100% {
+    background: rgba(255, 220, 100, 0.3) !important;
+    outline-color: #f6ad55 !important;
+  }
+  50% {
+    background: rgba(255, 180, 50, 0.6) !important;
+    outline-color: #dd6b20 !important;
+  }
+}
+
+/* Hidden utility */
+.jal-hidden {
+  display: none !important;
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+  .jal-panel-header {
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+  }
+
+  .jal-comment-card {
+    background: #1e1e2e;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  }
+
+  .jal-comment-card:hover {
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  }
+
+  .jal-comment-card::before {
+    background: #667eea;
+  }
+
+  .jal-comment-quote {
+    background: #2d2d3e;
+    color: #a0aec0;
+  }
+
+  .jal-comment-quote:hover {
+    background: #3d3d4e;
+  }
+
+  .jal-comment-body {
+    color: #e2e8f0;
+  }
+
+  .jal-empty {
+    background: #1e1e2e;
+    color: #a0aec0;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  }
+
+  .jal-comment-input {
+    background: #1e1e2e;
+  }
+
+  .jal-comment-input textarea {
+    background: #2d2d3e;
+    border-color: #3d3d4e;
+    color: #e2e8f0;
+  }
+
+  .jal-comment-input textarea:focus {
+    border-color: #667eea;
+  }
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .jal-panel {
+    width: 200px;
+    right: 4px;
+  }
+
+  .jal-panel-header {
+    right: 4px;
+    padding: 6px 10px;
+  }
+
+  .jal-panel-header h3 {
+    display: none;
+  }
+
+  .jal-comment-card {
+    padding: 8px;
+    max-width: 200px;
+  }
+
+  .jal-comment-card::before {
+    width: 10px;
+    left: -14px;
+  }
+
+  .jal-toggle-btn {
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
+    right: 8px;
+    top: 8px;
+  }
+
+  .jal-empty {
+    max-width: 180px;
+    right: 8px;
+    font-size: 11px;
+    padding: 12px;
+  }
+}

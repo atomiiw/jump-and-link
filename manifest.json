@@ -1,0 +1,84 @@
+{
+  "manifest_version": 3,
+  "name": "JAL - Jump and Link",
+  "version": "0.1.0",
+  "description": "Leave margin comments on AI chat responses, batch send them, and navigate like Google Docs comments",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
+    "https://*.deepseek.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://*.deepseek.com/*"
+      ],
+      "js": [
+        "lib/utils.js",
+        "lib/anchoring.js",
+        "lib/storage.js",
+        "providers/base.js",
+        "providers/chatgpt.js",
+        "providers/claude.js",
+        "providers/gemini.js",
+        "providers/deepseek.js",
+        "content_script.js"
+      ],
+      "css": ["styles/overlay.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "ui/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "commands": {
+    "jal-send": {
+      "suggested_key": {
+        "default": "Alt+J"
+      },
+      "description": "Send selected comments (JAL)"
+    },
+    "jal-return": {
+      "suggested_key": {
+        "default": "Alt+R"
+      },
+      "description": "Jump return (JR)"
+    },
+    "add-comment": {
+      "suggested_key": {
+        "default": "Alt+C"
+      },
+      "description": "Add comment on selection"
+    },
+    "toggle-panel": {
+      "suggested_key": {
+        "default": "Alt+G"
+      },
+      "description": "Toggle grouping panel"
+    }
+  }
+}
