@@ -50,61 +50,219 @@
   box-shadow: 0 4px 12px rgba(102, 126, 234, 0.5);
 }
 
-/* Margin comments container - positioned in the right margin area */
-.jal-panel {
-  position: absolute;
-  top: 0;
-  right: 8px;
-  width: 260px;
-  pointer-events: none;
-  z-index: 999998;
+/* Panel hidden - comments show on highlight click instead */
+.jal-panel,
+.jal-panel-header,
+.jal-panel-content {
+  display: none !important;
 }
 
-.jal-panel.jal-hidden {
-  opacity: 0;
-  pointer-events: none;
-}
-
-/* Floating header toolbar for actions */
-.jal-panel-header {
+/* Comment popup - shown when clicking a highlight */
+.jal-comment-popup {
   position: fixed;
-  top: 60px;
-  right: 8px;
+  z-index: 1000001;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  padding: 12px;
+  padding-bottom: 40px;
+  max-width: 300px;
+  min-width: 200px;
+  pointer-events: auto;
+}
+
+.jal-comment-popup .jal-popup-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 12px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  border-radius: 8px;
-  box-shadow: 0 2px 12px rgba(102, 126, 234, 0.4);
-  z-index: 999999;
-  pointer-events: auto;
-  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e2e8f0;
 }
 
-.jal-panel.jal-hidden .jal-panel-header {
-  opacity: 0;
-  transform: translateX(100%);
-  pointer-events: none;
-}
-
-.jal-panel-header h3 {
-  font-size: 12px;
+.jal-comment-popup .jal-status-badge {
+  font-size: 10px;
   font-weight: 600;
-  margin: 0;
-  white-space: nowrap;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #feebc8;
+  color: #c05621;
 }
 
-.jal-panel-actions {
+/* Visual state colors for popup badge */
+.jal-comment-popup.jal-state-draft .jal-status-badge {
+  background: #feebc8;
+  color: #c05621;
+}
+
+.jal-comment-popup.jal-state-added .jal-status-badge {
+  background: #bee3f8;
+  color: #2b6cb0;
+}
+
+.jal-comment-popup.jal-state-asked .jal-status-badge {
+  background: #c6f6d5;
+  color: #276749;
+}
+
+.jal-comment-popup .jal-popup-close {
+  background: none;
+  border: none;
+  font-size: 18px;
+  cursor: pointer;
+  color: #999;
+  padding: 0;
+  line-height: 1;
+}
+
+.jal-comment-popup .jal-popup-close:hover {
+  color: #333;
+}
+
+.jal-comment-popup .jal-popup-body {
+  font-size: 13px;
+  color: #2d3748;
+  line-height: 1.5;
+  padding-bottom: 8px;
+}
+
+/* Add to chat button - positioned bottom right */
+.jal-popup-add-btn {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: #f7f7f7;
+  color: #666;
+  font-size: 18px;
+  font-weight: 400;
+  cursor: pointer;
   display: flex;
-  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  line-height: 1;
 }
 
-/* Margin comment area - no scrolling, comments positioned absolutely */
-.jal-panel-content {
-  position: relative;
-  pointer-events: none;
+.jal-popup-add-btn:hover:not(.jal-disabled) {
+  background: #e2e8f0;
+  color: #4a5568;
+  transform: scale(1.1);
+}
+
+/* Disabled state for add button (comment already in composer) */
+.jal-popup-add-btn.jal-disabled {
+  background: #e2e8f0;
+  color: #a0aec0;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.jal-popup-add-btn.jal-disabled:hover {
+  transform: none;
+  background: #e2e8f0;
+  color: #a0aec0;
+}
+
+/* Edit button - positioned bottom left */
+.jal-popup-edit-btn {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: #f7f7f7;
+  color: #666;
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  line-height: 1;
+}
+
+.jal-popup-edit-btn:hover:not(.jal-disabled) {
+  background: #e2e8f0;
+  color: #4a5568;
+  transform: scale(1.1);
+}
+
+.jal-popup-edit-btn.jal-disabled {
+  background: #e2e8f0;
+  color: #a0aec0;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.jal-popup-edit-btn.jal-disabled:hover {
+  transform: none;
+}
+
+/* Edit mode textarea */
+.jal-popup-edit-textarea {
+  width: 100%;
+  min-height: 60px;
+  padding: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+  margin-bottom: 8px;
+}
+
+.jal-popup-edit-textarea:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
+}
+
+/* Edit mode - reduce bottom padding since buttons are hidden */
+.jal-comment-popup.jal-edit-mode {
+  padding-bottom: 12px;
+}
+
+/* Edit mode action buttons */
+.jal-popup-edit-actions {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0;
+}
+
+.jal-popup-save-btn,
+.jal-popup-cancel-btn {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.jal-popup-save-btn {
+  background: #48bb78;
+  color: white;
+}
+
+.jal-popup-save-btn:hover {
+  background: #38a169;
+}
+
+.jal-popup-cancel-btn {
+  background: #e2e8f0;
+  color: #4a5568;
+}
+
+.jal-popup-cancel-btn:hover {
+  background: #cbd5e0;
 }
 
 /* Buttons */
@@ -302,25 +460,25 @@
   line-height: 1.5;
 }
 
-/* Floating button */
+/* Floating button - Apple-style comment card */
 .jal-floating-btn {
   position: absolute;
-  padding: 6px 12px;
-  background: #667eea;
-  color: white;
+  padding: 8px 12px;
+  background: white;
+  color: #2d3748;
   border: none;
-  border-radius: 6px;
-  font-size: 12px;
+  border-radius: 8px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
   transition: all 0.2s ease;
   z-index: 1000000;
 }
 
 .jal-floating-btn:hover {
-  background: #5a67d8;
-  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  transform: translateY(-1px);
 }
 
 .jal-floating-btn.jal-hidden {
@@ -329,7 +487,7 @@
 
 /* Comment input */
 .jal-comment-input {
-  position: absolute;
+  position: fixed;
   width: 280px;
   background: white;
   border-radius: 8px;
@@ -361,9 +519,8 @@
 
 .jal-input-actions {
   display: flex;
-  gap: 8px;
   margin-top: 8px;
-  justify-content: flex-end;
+  justify-content: space-between;
 }
 
 .jal-input-actions .jal-btn {
@@ -384,55 +541,57 @@
   background: #5a67d8;
 }
 
-/* Highlights - inline mark elements that scroll with content */
-mark.jal-highlight {
-  background: rgba(255, 220, 100, 0.4) !important;
-  border-bottom: 2px solid #f6ad55 !important;
+/* Highlight overlays - clickable to show comment */
+.jal-highlight-overlay {
+  pointer-events: auto;
   cursor: pointer;
-  transition: background 0.2s ease;
-  padding: 0 !important;
-  margin: 0 !important;
-  display: inline !important;
-  color: inherit !important;
+  z-index: 1;
+  mix-blend-mode: multiply;
+  transition: background-color 0.15s ease;
 }
 
-mark.jal-highlight:hover {
-  background: rgba(255, 220, 100, 0.6) !important;
+/* Hover states - darker version of each visual state */
+/* Draft (orange) hover */
+.jal-highlight-overlay.jal-hover {
+  background-color: rgba(255, 180, 50, 0.7) !important;
 }
 
-mark.jal-highlight.jal-flash {
-  animation: jal-flash 0.5s ease-in-out 3;
+.jal-highlight-overlay[data-visual-state="draft"].jal-hover {
+  background-color: rgba(255, 180, 50, 0.7) !important;
 }
 
-/* Active state when comment card is hovered */
-mark.jal-highlight.jal-active {
-  background: rgba(255, 180, 50, 0.6) !important;
-  box-shadow: 0 0 0 2px rgba(255, 180, 50, 0.4);
+/* Added (blue) hover */
+.jal-highlight-overlay[data-visual-state="added"].jal-hover {
+  background-color: rgba(60, 140, 220, 0.7) !important;
 }
 
-/* Element highlights - for equations, images, code blocks, etc. */
-.jal-highlight-element {
-  background: rgba(255, 220, 100, 0.4) !important;
-  outline: 2px solid #f6ad55 !important;
-  outline-offset: 2px !important;
-  cursor: pointer;
-  transition: background 0.2s ease, outline 0.2s ease;
-  border-radius: 4px;
+/* Asked (green) hover */
+.jal-highlight-overlay[data-visual-state="asked"].jal-hover {
+  background-color: rgba(60, 180, 110, 0.7) !important;
 }
 
-.jal-highlight-element:hover {
-  background: rgba(255, 220, 100, 0.6) !important;
-  outline: 2px solid #dd6b20 !important;
+/* Underline overlays - at bottom of highlights */
+.jal-underline {
+  pointer-events: none;
+  z-index: 1;
+  transition: background-color 0.15s ease;
 }
 
-.jal-highlight-element.jal-flash {
-  animation: jal-flash-element 0.5s ease-in-out 3;
+/* Underline hover states */
+.jal-underline.jal-hover {
+  background-color: #dd6b20 !important;
 }
 
-/* Active state when comment card is hovered */
-.jal-highlight-element.jal-active {
-  background: rgba(255, 180, 50, 0.6) !important;
-  outline: 3px solid #dd6b20 !important;
+.jal-underline[data-visual-state="draft"].jal-hover {
+  background-color: #dd6b20 !important;
+}
+
+.jal-underline[data-visual-state="added"].jal-hover {
+  background-color: #2b6cb0 !important;
+}
+
+.jal-underline[data-visual-state="asked"].jal-hover {
+  background-color: #276749 !important;
 }
 
 /* Comment card active state when hovering its highlight */
@@ -466,58 +625,41 @@ mark.jal-highlight.jal-active {
   }
 }
 
-@keyframes jal-flash-element {
-  0%, 100% {
-    background: rgba(255, 220, 100, 0.3) !important;
-    outline-color: #f6ad55 !important;
-  }
-  50% {
-    background: rgba(255, 180, 50, 0.6) !important;
-    outline-color: #dd6b20 !important;
-  }
+/* jal-flash-element removed - now uses same jal-flash animation as text */
+
+/* Hidden utility - but NOT for the panel which uses opacity */
+.jal-hidden:not(.jal-panel) {
+  display: none !important;
 }
 
-/* Hidden utility */
-.jal-hidden {
-  display: none !important;
+/* Panel hidden state uses opacity/visibility instead of display:none */
+.jal-panel.jal-hidden {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
 }
 
 /* Dark mode support */
 @media (prefers-color-scheme: dark) {
-  .jal-panel-header {
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
-  }
-
-  .jal-comment-card {
+  .jal-comment-popup {
     background: #1e1e2e;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
   }
 
-  .jal-comment-card:hover {
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  .jal-comment-popup .jal-popup-header {
+    border-bottom-color: #3d3d4e;
   }
 
-  .jal-comment-card::before {
-    background: #667eea;
-  }
-
-  .jal-comment-quote {
-    background: #2d2d3e;
-    color: #a0aec0;
-  }
-
-  .jal-comment-quote:hover {
-    background: #3d3d4e;
-  }
-
-  .jal-comment-body {
+  .jal-comment-popup .jal-popup-body {
     color: #e2e8f0;
   }
 
-  .jal-empty {
-    background: #1e1e2e;
+  .jal-comment-popup .jal-popup-close {
     color: #a0aec0;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  }
+
+  .jal-comment-popup .jal-popup-close:hover {
+    color: #e2e8f0;
   }
 
   .jal-comment-input {

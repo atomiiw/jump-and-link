@@ -54,12 +54,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Storage helpers
 async function getComments(pageId) {
+  console.log('JAL Background: Getting comments for pageId:', pageId);
   const result = await chrome.storage.local.get('comments');
+  console.log('JAL Background: All stored comments:', result.comments);
   const allComments = result.comments || {};
-  return allComments[pageId] || [];
+  const pageComments = allComments[pageId] || [];
+  console.log('JAL Background: Found', pageComments.length, 'comments for this page');
+  return pageComments;
 }
 
 async function saveComment(comment) {
+  console.log('JAL Background: Saving comment:', comment.commentId);
+  console.log('JAL Background: For pageId:', comment.pageId);
+
   const result = await chrome.storage.local.get('comments');
   const allComments = result.comments || {};
 
@@ -70,6 +77,7 @@ async function saveComment(comment) {
   allComments[comment.pageId].push(comment);
   await chrome.storage.local.set({ comments: allComments });
 
+  console.log('JAL Background: Comment saved. Total comments for page:', allComments[comment.pageId].length);
   return { success: true, comment };
 }
 

@@ -72,6 +72,25 @@ window.JAL.Providers.chatgpt = {
   },
 
   /**
+   * Get all user message elements
+   */
+  getUserMessages() {
+    let messages = document.querySelectorAll('[data-message-author-role="user"]');
+    if (messages.length > 0) {
+      return [...messages];
+    }
+    return [];
+  },
+
+  /**
+   * Get text content of all user messages combined
+   */
+  getAllUserMessageText() {
+    const messages = this.getUserMessages();
+    return messages.map(m => m.textContent || '').join('\n');
+  },
+
+  /**
    * Get all assistant message elements
    */
   getAssistantMessages() {
@@ -203,6 +222,24 @@ window.JAL.Providers.chatgpt = {
   },
 
   /**
+   * Get current text content from the composer
+   */
+  getComposerContent() {
+    const composer = this.getComposerElement();
+    if (!composer) return '';
+
+    if (composer.isContentEditable || composer.getAttribute('contenteditable') === 'true') {
+      return composer.textContent || '';
+    }
+
+    if (composer.tagName === 'TEXTAREA') {
+      return composer.value || '';
+    }
+
+    return '';
+  },
+
+  /**
    * Insert text into ChatGPT's composer
    */
   insertIntoComposer(text) {
@@ -251,6 +288,56 @@ window.JAL.Providers.chatgpt = {
         'value'
       ).set;
       nativeInputValueSetter.call(composer, text);
+      composer.dispatchEvent(new Event('input', { bubbles: true }));
+
+      return true;
+    }
+
+    return false;
+  },
+
+  /**
+   * Append text to the composer (keeps existing content)
+   */
+  appendToComposer(text) {
+    const composer = this.getComposerElement();
+    if (!composer) {
+      console.warn('JAL: Could not find ChatGPT composer');
+      return false;
+    }
+
+    composer.focus();
+    const existingContent = this.getComposerContent();
+    const newContent = existingContent ? existingContent + '\n\n' + text : text;
+
+    // ChatGPT uses a contenteditable div now
+    if (composer.isContentEditable || composer.getAttribute('contenteditable') === 'true') {
+      composer.innerHTML = '';
+      const p = document.createElement('p');
+      p.textContent = newContent;
+      composer.appendChild(p);
+
+      composer.dispatchEvent(new Event('input', { bubbles: true }));
+      composer.dispatchEvent(new Event('change', { bubbles: true }));
+
+      // Move cursor to end
+      const range = document.createRange();
+      range.selectNodeContents(composer);
+      range.collapse(false);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+
+      return true;
+    }
+
+    // Fallback for textarea
+    if (composer.tagName === 'TEXTAREA') {
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value'
+      ).set;
+      nativeInputValueSetter.call(composer, newContent);
       composer.dispatchEvent(new Event('input', { bubbles: true }));
 
       return true;
@@ -338,6 +425,46 @@ window.JAL.Providers.chatgpt = {
     observer.observe(container, {
       childList: true,
       subtree: true
+    });
+
+    return observer;
+  },
+
+  /**
+   * Observe composer for content changes (to detect when cleared/sent)
+   */
+  observeComposer(callback) {
+    const composer = this.getComposerElement();
+    if (!composer) {
+      console.warn('JAL: Could not find composer for observation');
+      return null;
+    }
+
+    let lastContent = this.getComposerContent();
+    const self = this;
+
+    const observer = new MutationObserver(() => {
+      const currentContent = self.getComposerContent();
+      // Detect when content is cleared (was non-empty, now empty)
+      if (lastContent && lastContent.length > 0 && (!currentContent || currentContent.length === 0)) {
+        callback('cleared');
+      }
+      lastContent = currentContent;
+    });
+
+    observer.observe(composer, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+
+    // Also listen for input events
+    composer.addEventListener('input', () => {
+      const currentContent = self.getComposerContent();
+      if (lastContent && lastContent.length > 0 && (!currentContent || currentContent.length === 0)) {
+        callback('cleared');
+      }
+      lastContent = currentContent;
     });
 
     return observer;

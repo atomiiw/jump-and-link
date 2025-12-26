@@ -16,6 +16,7 @@
     pageId: null,
     comments: [],
     selectedComments: new Set(),
+    commentsInComposer: new Set(), // Track comments currently added to chatbox
     jumpStack: [],
     isObserving: false,
     pendingJump: null, // Jump frame waiting for AI response
@@ -50,11 +51,14 @@
     // Create UI
     JAL.UI.createOverlay();
 
-    // Load existing comments
-    await JAL.loadComments();
+    // Wait for messages to have actual content before marking
+    await JAL.waitForMessageContent();
 
-    // Mark existing messages
+    // Mark existing messages (now they have content to fingerprint)
     JAL.markAllMessages();
+
+    // Load existing comments (now messages have fingerprints to match against)
+    await JAL.loadComments();
 
     // Setup event listeners
     JAL.setupEventListeners();
@@ -62,17 +66,81 @@
     // Start observing for new messages
     JAL.startObserving();
 
+    // Start observing composer for send/clear events
+    JAL.startComposerObserving();
+
     console.log('JAL: Initialized successfully');
+  };
+
+  /**
+   * Start observing the composer for clear/send events
+   */
+  JAL.startComposerObserving = function() {
+    if (!JAL.state.adapter.observeComposer) return;
+
+    JAL.state.adapter.observeComposer((event) => {
+      if (event === 'cleared' && JAL.state.commentsInComposer.size > 0) {
+        console.log('JAL: Composer cleared, checking if sent...');
+
+        // Wait for the user message to appear in DOM, then check
+        // Use a longer delay and retry mechanism for reliability
+        setTimeout(() => {
+          JAL.clearComposerTracking();
+        }, 1000);
+      }
+    });
   };
 
   /**
    * Load comments from storage
    */
   JAL.loadComments = async function() {
-    const comments = await JAL.Storage.getComments(JAL.state.pageId);
-    JAL.state.comments = comments;
-    JAL.UI.renderComments();
-    JAL.UI.renderHighlights();
+    console.log('=== JAL DEBUG: Loading Comments ===');
+    console.log('JAL DEBUG: Current URL:', window.location.href);
+    console.log('JAL DEBUG: PageId:', JAL.state.pageId);
+
+    try {
+      const comments = await JAL.Storage.getComments(JAL.state.pageId);
+      console.log('JAL DEBUG: Loaded', comments.length, 'comments from storage');
+      if (comments.length > 0) {
+        console.log('JAL DEBUG: First comment:', comments[0]);
+        console.log('JAL DEBUG: First comment status:', comments[0].status);
+      }
+      JAL.state.comments = comments;
+      JAL.UI.renderComments();
+      JAL.UI.renderHighlights();
+
+      // Retry once if some highlights failed (content might still be loading)
+      const renderedCount = JAL.state.ui.highlights.size;
+      if (renderedCount < comments.length) {
+        console.log('JAL: Some highlights missing, retrying in 500ms...');
+        setTimeout(() => {
+          JAL.markAllMessages();
+          JAL.UI.renderHighlights();
+        }, 500);
+      }
+    } catch (err) {
+      console.error('JAL DEBUG: Error loading comments:', err);
+    }
+  };
+
+  /**
+   * Wait for message content to be available (ChatGPT loads progressively)
+   */
+  JAL.waitForMessageContent = async function() {
+    const maxAttempts = 15;
+    const delay = 100;
+
+    for (let i = 0; i < maxAttempts; i++) {
+      // Look for actual rendered markdown content
+      const markdown = document.querySelector('[data-message-author-role="assistant"] .markdown, [data-message-author-role="assistant"] .prose');
+      if (markdown && markdown.textContent && markdown.textContent.length > 10) {
+        console.log('JAL: Message content ready after', i * delay, 'ms');
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+    console.log('JAL: Timeout waiting for message content');
   };
 
   /**
@@ -127,39 +195,21 @@
   JAL.handleSelection = function(e) {
     const selection = window.getSelection();
 
-    // Hide floating button if selection is empty
     if (!selection || selection.isCollapsed || selection.toString().trim().length === 0) {
       JAL.UI.hideFloatingButton();
       return;
     }
 
-    console.log('JAL: Selection detected:', selection.toString().slice(0, 50));
-
-    // Check if selection is within an assistant message
     const range = selection.getRangeAt(0);
     const container = JAL.state.adapter.findMessageContainer(range.commonAncestorContainer);
 
-    console.log('JAL: Found container:', container);
-
-    if (!container) {
-      console.log('JAL: No container found for selection');
+    if (!container || !JAL.state.adapter.isAssistantMessage(container)) {
       JAL.UI.hideFloatingButton();
       return;
     }
 
-    // Make sure it's an assistant message
-    const isAssistant = JAL.state.adapter.isAssistantMessage(container);
-    console.log('JAL: Is assistant message:', isAssistant);
-
-    if (!isAssistant) {
-      JAL.UI.hideFloatingButton();
-      return;
-    }
-
-    // Show floating button near selection
     const rect = range.getBoundingClientRect();
-    console.log('JAL: Showing button at', rect.right + 10, rect.top);
-    JAL.UI.showFloatingButton(rect.right + 10, rect.top);
+    JAL.UI.showFloatingButton(rect, container);
   };
 
   /**
@@ -352,6 +402,184 @@
   };
 
   /**
+   * Add a single comment to the composer (for incremental building)
+   */
+  JAL.addCommentToComposer = function(commentId) {
+    // Check if already in composer
+    if (JAL.state.commentsInComposer.has(commentId)) {
+      console.log('JAL: Comment already in composer');
+      return;
+    }
+
+    const comment = JAL.state.comments.find(c => c.commentId === commentId);
+    if (!comment) {
+      console.log('JAL: Comment not found');
+      return;
+    }
+
+    const adapter = JAL.state.adapter;
+    const existingContent = adapter.getComposerContent ? adapter.getComposerContent() : '';
+
+    // Normalize whitespace helper
+    const normalize = (text) => text ? text.replace(/\s+/g, ' ').trim() : '';
+
+    const anchor = comment.anchor;
+    const quote = normalize(anchor.quoteExact);
+    let context = normalize(anchor.contextSentences);
+    if (!context) {
+      context = "(context not captured)";
+    }
+
+    // Check if there's already JAL content in the composer
+    // Look for the pattern "#1\n" or "#2\n" etc.
+    const jalPattern = /#(\d+)\n/g;
+    const matches = [...existingContent.matchAll(jalPattern)];
+
+    let nextNumber = 1;
+    let promptText = '';
+
+    if (matches.length > 0) {
+      // Find the highest number
+      const numbers = matches.map(m => parseInt(m[1], 10));
+      nextNumber = Math.max(...numbers) + 1;
+
+      // Add new comment entry (compressed symbolic format) - one blank line before
+      promptText = `\n#${nextNumber}\n`;
+      promptText += `【${context}】\n`;
+      promptText += `→"${quote}"：${comment.body}`;
+    } else {
+      // First comment (compressed symbolic format)
+      promptText = `#1\n`;
+      promptText += `【${context}】\n`;
+      promptText += `→"${quote}"：${comment.body}`;
+    }
+
+    // Append to composer
+    const success = adapter.appendToComposer ? adapter.appendToComposer(promptText) : adapter.insertIntoComposer(promptText);
+
+    if (success) {
+      console.log(`JAL: Added comment #${nextNumber} to composer`);
+
+      // Track that this comment is now in the composer
+      JAL.state.commentsInComposer.add(commentId);
+
+      // Update visual state
+      JAL.UI.updateCommentVisualState(commentId, 'added');
+
+      // Close the popup after adding
+      JAL.UI.hideCommentPopup();
+    } else {
+      alert('Could not add to composer. Please copy manually:\n\n' + promptText);
+    }
+  };
+
+  /**
+   * Check if a comment is currently in the composer
+   */
+  JAL.isCommentInComposer = function(commentId) {
+    return JAL.state.commentsInComposer.has(commentId);
+  };
+
+  /**
+   * Get the visual state of a comment
+   * Returns: 'draft' (orange), 'added' (blue), or 'asked' (green)
+   */
+  JAL.getCommentVisualState = function(commentId) {
+    // Currently in composer = blue (added)
+    if (JAL.state.commentsInComposer.has(commentId)) {
+      return 'added';
+    }
+
+    // Check stored status
+    const comment = JAL.state.comments.find(c => c.commentId === commentId);
+    if (!comment) return 'draft';
+
+    // Asked = status is queued or sent (set when transitioning from added)
+    if (comment.status === 'queued' || comment.status === 'sent') {
+      return 'asked';
+    }
+
+    // Default is draft
+    return 'draft';
+  };
+
+  /**
+   * Check if a comment's content appears in any user message as a JAL prompt
+   */
+  JAL.isCommentInUserMessages = function(comment) {
+    if (!JAL.state.adapter.getAllUserMessageText) return false;
+
+    const userMessagesText = JAL.state.adapter.getAllUserMessageText();
+    if (!userMessagesText) return false;
+
+    const commentBody = comment.body.trim();
+    if (!commentBody) return false;
+
+    // Look for the new compressed format: →"quote"：{comment body}
+    const jalPattern = `：${commentBody}`;
+    if (userMessagesText.includes(jalPattern)) {
+      return true;
+    }
+
+    // Also check old format for backwards compatibility
+    const oldPattern = `Respond to my comment below:\n${commentBody}`;
+    if (userMessagesText.includes(oldPattern)) {
+      return true;
+    }
+
+    return false;
+  };
+
+  /**
+   * Called when composer is cleared - check if comments were actually sent
+   */
+  JAL.clearComposerTracking = function() {
+    console.log('JAL: clearComposerTracking called, comments in composer:', JAL.state.commentsInComposer.size);
+
+    for (const commentId of JAL.state.commentsInComposer) {
+      const comment = JAL.state.comments.find(c => c.commentId === commentId);
+      if (comment) {
+        // Check if the comment was actually sent by looking at user messages
+        const wasFound = JAL.isCommentInUserMessages(comment);
+        console.log('JAL: Comment', commentId, 'found in user messages:', wasFound);
+
+        if (wasFound) {
+          // It was sent! Mark as asked
+          console.log('JAL: Marking comment as asked (queued)');
+          comment.status = 'queued';
+          JAL.Storage.updateComment(commentId, { status: 'queued' });
+          JAL.UI.updateCommentVisualState(commentId, 'asked');
+        } else {
+          // Not found in user messages - but if composer was cleared,
+          // the message was likely sent. Mark as asked anyway since
+          // the composer had JAL content and was cleared (indicating send)
+          console.log('JAL: Comment not found in DOM but composer was cleared - marking as asked');
+          comment.status = 'queued';
+          JAL.Storage.updateComment(commentId, { status: 'queued' });
+          JAL.UI.updateCommentVisualState(commentId, 'asked');
+        }
+      }
+    }
+    JAL.state.commentsInComposer.clear();
+  };
+
+  /**
+   * Called when a message is actually sent - mark added comments as asked
+   */
+  JAL.markComposerCommentsSent = function() {
+    // Mark all "added" comments as "asked" (queued) since they were actually sent
+    for (const commentId of JAL.state.commentsInComposer) {
+      const comment = JAL.state.comments.find(c => c.commentId === commentId);
+      if (comment && comment.status === 'draft') {
+        comment.status = 'queued';
+        JAL.Storage.updateComment(commentId, { status: 'queued' });
+      }
+      JAL.UI.updateCommentVisualState(commentId, 'asked');
+    }
+    JAL.state.commentsInComposer.clear();
+  };
+
+  /**
    * Jump return (JR) - go back to where we were
    */
   JAL.jumpReturn = async function() {
@@ -386,11 +614,8 @@
      * Create the main overlay UI
      */
     createOverlay() {
-      console.log('JAL DEBUG: createOverlay called');
-      // Main container
       const container = document.createElement('div');
       container.id = 'jal-container';
-      console.log('JAL DEBUG: creating container element');
       container.innerHTML = `
         <div id="jal-panel" class="jal-panel jal-hidden">
           <div class="jal-panel-header">
@@ -412,24 +637,20 @@
         <button id="jal-toggle-btn" class="jal-toggle-btn" title="Toggle JAL Panel (Alt+G)">
           <span>💬</span>
         </button>
-        <button id="jal-floating-btn" class="jal-floating-btn jal-hidden">+ Comment</button>
+        <button id="jal-floating-btn" class="jal-floating-btn jal-hidden">Add Comment</button>
         <div id="jal-comment-input" class="jal-comment-input jal-hidden">
           <textarea id="jal-comment-textarea" placeholder="Enter your comment (or just '?')"></textarea>
           <div class="jal-input-actions">
-            <button class="jal-btn jal-btn-primary" id="jal-save-comment">Save</button>
             <button class="jal-btn" id="jal-cancel-comment">Cancel</button>
+            <button class="jal-btn jal-btn-primary" id="jal-save-comment">Save</button>
           </div>
         </div>
       `;
 
       document.body.appendChild(container);
       JAL.state.ui.container = container;
-      console.log('JAL DEBUG: container appended to body');
-      console.log('JAL DEBUG: container element:', document.getElementById('jal-container'));
-      console.log('JAL DEBUG: panel element:', document.getElementById('jal-panel'));
-      console.log('JAL DEBUG: comments list element:', document.getElementById('jal-comments-list'));
 
-      // Event listeners for UI
+      // Event listeners
       document.getElementById('jal-toggle-btn').addEventListener('click', () => this.togglePanel());
       document.getElementById('jal-close-btn').addEventListener('click', () => this.togglePanel());
       document.getElementById('jal-send-btn').addEventListener('click', () => JAL.sendSelected());
@@ -437,111 +658,53 @@
       document.getElementById('jal-floating-btn').addEventListener('click', () => JAL.addCommentFromSelection());
       document.getElementById('jal-save-comment').addEventListener('click', () => this.saveCommentFromInput());
       document.getElementById('jal-cancel-comment').addEventListener('click', () => this.hideCommentInput());
-      console.log('JAL DEBUG: event listeners attached');
-
-      // Debug: Check computed styles
-      this.debugStyles();
     },
 
     /**
-     * Debug helper to check computed styles of key elements
+     * Debug helper (disabled - call manually if needed)
      */
     debugStyles() {
-      console.log('JAL DEBUG: ========= STYLE DEBUG =========');
-      const container = document.getElementById('jal-container');
-      const panel = document.getElementById('jal-panel');
-      const header = document.querySelector('.jal-panel-header');
-      const list = document.getElementById('jal-comments-list');
-      const toggleBtn = document.getElementById('jal-toggle-btn');
-
-      if (container) {
-        const cs = window.getComputedStyle(container);
-        console.log('JAL DEBUG: container styles:', {
-          position: cs.position,
-          zIndex: cs.zIndex,
-          display: cs.display,
-          visibility: cs.visibility,
-          opacity: cs.opacity,
-          pointerEvents: cs.pointerEvents
-        });
-      }
-
-      if (panel) {
-        const cs = window.getComputedStyle(panel);
-        console.log('JAL DEBUG: panel styles:', {
-          position: cs.position,
-          top: cs.top,
-          right: cs.right,
-          width: cs.width,
-          display: cs.display,
-          visibility: cs.visibility,
-          opacity: cs.opacity,
-          zIndex: cs.zIndex,
-          pointerEvents: cs.pointerEvents
-        });
-      }
-
-      if (header) {
-        const cs = window.getComputedStyle(header);
-        console.log('JAL DEBUG: header styles:', {
-          position: cs.position,
-          top: cs.top,
-          right: cs.right,
-          display: cs.display,
-          visibility: cs.visibility,
-          opacity: cs.opacity,
-          zIndex: cs.zIndex,
-          pointerEvents: cs.pointerEvents,
-          background: cs.background
-        });
-      }
-
-      if (toggleBtn) {
-        const cs = window.getComputedStyle(toggleBtn);
-        console.log('JAL DEBUG: toggle button styles:', {
-          position: cs.position,
-          top: cs.top,
-          right: cs.right,
-          width: cs.width,
-          height: cs.height,
-          display: cs.display,
-          visibility: cs.visibility,
-          opacity: cs.opacity,
-          zIndex: cs.zIndex
-        });
-      }
-
-      console.log('JAL DEBUG: ========= END STYLE DEBUG =========');
+      // Disabled to reduce console noise
     },
 
     /**
      * Toggle the panel visibility
      */
     togglePanel() {
-      console.log('JAL DEBUG: togglePanel called');
       const panel = document.getElementById('jal-panel');
-      console.log('JAL DEBUG: panel before toggle:', panel, 'has jal-hidden:', panel.classList.contains('jal-hidden'));
       panel.classList.toggle('jal-hidden');
-      console.log('JAL DEBUG: panel after toggle, has jal-hidden:', panel.classList.contains('jal-hidden'));
 
-      // Re-check styles after toggle
-      setTimeout(() => {
-        this.debugStyles();
-        // Also reposition comments when panel becomes visible
-        if (!panel.classList.contains('jal-hidden')) {
-          console.log('JAL DEBUG: panel now visible, repositioning comments');
-          this.positionComments();
-        }
-      }, 100);
+      // Reposition comments when panel becomes visible
+      if (!panel.classList.contains('jal-hidden')) {
+        setTimeout(() => this.positionComments(), 100);
+      }
     },
 
     /**
-     * Show the floating "+ Comment" button
+     * Show the floating "+ Comment" button attached to the message element
      */
-    showFloatingButton(x, y) {
+    showFloatingButton(selectionRect, messageElement) {
       const btn = document.getElementById('jal-floating-btn');
-      btn.style.left = `${x}px`;
-      btn.style.top = `${y + window.scrollY}px`;
+      if (!btn) return;
+
+      // Ensure message element has relative positioning
+      if (getComputedStyle(messageElement).position === 'static') {
+        messageElement.style.position = 'relative';
+      }
+
+      // Move button inside the message element if not already there
+      if (btn.parentElement !== messageElement) {
+        messageElement.appendChild(btn);
+      }
+
+      // Position relative to message element
+      const messageRect = messageElement.getBoundingClientRect();
+      const relativeLeft = selectionRect.right - messageRect.left + 10;
+      const relativeTop = selectionRect.top - messageRect.top;
+
+      btn.style.position = 'absolute';
+      btn.style.left = `${relativeLeft}px`;
+      btn.style.top = `${relativeTop}px`;
       btn.classList.remove('jal-hidden');
     },
 
@@ -550,7 +713,9 @@
      */
     hideFloatingButton() {
       const btn = document.getElementById('jal-floating-btn');
-      btn.classList.add('jal-hidden');
+      if (btn) {
+        btn.classList.add('jal-hidden');
+      }
     },
 
     /**
@@ -563,30 +728,211 @@
       const input = document.getElementById('jal-comment-input');
       const textarea = document.getElementById('jal-comment-textarea');
 
-      // Position near the selection
       const selection = window.getSelection();
       if (selection && !selection.isCollapsed) {
         const range = selection.getRangeAt(0);
         const rect = range.getBoundingClientRect();
-        input.style.left = `${rect.right + 20}px`;
-        input.style.top = `${rect.top + window.scrollY}px`;
+
+        // Keep input in jal-container (not inside message) to avoid clipping
+        const jalContainer = document.getElementById('jal-container');
+        if (input.parentElement !== jalContainer) {
+          jalContainer.appendChild(input);
+        }
+
+        // Use fixed positioning with viewport coordinates
+        // Position to the right of selection, clamped to viewport
+        let left = rect.right + 20;
+        let top = rect.top;
+
+        // Clamp to viewport bounds
+        const inputWidth = 280; // from CSS
+        const inputHeight = 150; // approximate
+        if (left + inputWidth > window.innerWidth - 20) {
+          left = rect.left - inputWidth - 20; // flip to left side
+        }
+        if (top + inputHeight > window.innerHeight - 20) {
+          top = window.innerHeight - inputHeight - 20;
+        }
+        if (top < 20) top = 20;
+
+        input.style.position = 'fixed';
+        input.style.left = `${left}px`;
+        input.style.top = `${top}px`;
+
+        // Create temporary highlight (final merged version)
+        this.pendingHighlights = this.highlightRange(range.cloneRange(), 'jal-pending');
       }
 
       input.classList.remove('jal-hidden');
       textarea.value = '';
-      textarea.focus();
-
+      textarea.focus({ preventScroll: true });
       this.hideFloatingButton();
     },
 
     /**
-     * Hide comment input
+     * Hide comment input and remove temporary highlight if cancelled
      */
     hideCommentInput() {
       const input = document.getElementById('jal-comment-input');
       input.classList.add('jal-hidden');
+
+      // Remove temporary highlights
+      this.removePendingHighlights();
+
       this.pendingAnchor = null;
       this.pendingMessage = null;
+    },
+
+    /**
+     * Remove temporary pending highlights
+     */
+    removePendingHighlights() {
+      // Remove all pending overlay elements
+      document.querySelectorAll('.jal-highlight-overlay[data-comment-id="jal-pending"], .jal-underline[data-comment-id="jal-pending"]').forEach(el => {
+        el.remove();
+      });
+
+      this.pendingHighlights = null;
+    },
+
+    /**
+     * Merge pending highlights into final highlights
+     * Uses the exact positions from debug view, applies merging, creates new elements
+     */
+    mergePendingHighlights(commentId) {
+      const pendingEls = document.querySelectorAll('.jal-highlight-overlay[data-comment-id="jal-pending"]');
+      if (pendingEls.length === 0) return [];
+
+      // Get the message element (parent of first pending highlight)
+      const messageElement = pendingEls[0].parentElement;
+      const messageRect = messageElement.getBoundingClientRect();
+
+      // Extract positions from pending highlights (these are the accurate debug rects)
+      let lines = [];
+      pendingEls.forEach(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          lines.push({
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            bottom: rect.bottom
+          });
+        }
+      });
+
+      // Remove all pending elements
+      document.querySelectorAll('.jal-highlight-overlay[data-comment-id="jal-pending"], .jal-underline[data-comment-id="jal-pending"]').forEach(el => {
+        el.remove();
+      });
+      this.pendingHighlights = null;
+
+      if (lines.length === 0) return [];
+
+      console.log(`JAL MERGE: ${lines.length} debug rects -> merging...`);
+
+      // Apply merging: group by same line (centers within half smaller height)
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (let i = 0; i < lines.length; i++) {
+          for (let j = i + 1; j < lines.length; j++) {
+            const a = lines[i];
+            const b = lines[j];
+
+            const centerA = (a.top + a.bottom) / 2;
+            const centerB = (b.top + b.bottom) / 2;
+            const heightA = a.bottom - a.top;
+            const heightB = b.bottom - b.top;
+            const smallerHeight = Math.min(heightA, heightB);
+            const centerDistance = Math.abs(centerA - centerB);
+
+            const sameLine = centerDistance < smallerHeight / 2;
+
+            if (sameLine) {
+              const merged = {
+                left: Math.min(a.left, b.left),
+                right: Math.max(a.right, b.right),
+                top: Math.min(a.top, b.top),
+                bottom: Math.max(a.bottom, b.bottom)
+              };
+              lines.splice(j, 1);
+              lines.splice(i, 1);
+              lines.push(merged);
+              changed = true;
+              break;
+            }
+          }
+          if (changed) break;
+        }
+      }
+
+      console.log(`JAL MERGE: -> ${lines.length} merged lines`);
+
+      // Create final highlight elements
+      const highlights = [];
+      for (const line of lines) {
+        const lineHeight = line.bottom - line.top;
+        const lineWidth = line.right - line.left;
+        const relativeTop = line.top - messageRect.top;
+        const relativeLeft = line.left - messageRect.left;
+
+        const highlight = document.createElement('div');
+        highlight.className = 'jal-highlight-overlay';
+        highlight.dataset.commentId = commentId;
+        highlight.style.cssText = `
+          position: absolute;
+          left: ${relativeLeft}px;
+          top: ${relativeTop}px;
+          width: ${lineWidth}px;
+          height: ${lineHeight}px;
+          background-color: rgba(255, 220, 100, 0.5);
+          pointer-events: auto;
+          cursor: pointer;
+          z-index: 1;
+          mix-blend-mode: multiply;
+        `;
+
+        highlight.addEventListener('click', (e) => {
+          e.stopPropagation();
+          JAL.UI.showCommentPopup(commentId, e.clientX, e.clientY);
+        });
+
+        highlight.addEventListener('mouseenter', (e) => {
+          const cid = e.target.dataset.commentId;
+          document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${cid}"], .jal-underline[data-comment-id="${cid}"]`).forEach(el => {
+            el.classList.add('jal-hover');
+          });
+        });
+        highlight.addEventListener('mouseleave', (e) => {
+          const cid = e.target.dataset.commentId;
+          document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${cid}"], .jal-underline[data-comment-id="${cid}"]`).forEach(el => {
+            el.classList.remove('jal-hover');
+          });
+        });
+
+        messageElement.appendChild(highlight);
+        highlights.push(highlight);
+
+        // Create underline
+        const underline = document.createElement('div');
+        underline.className = 'jal-underline';
+        underline.dataset.commentId = commentId;
+        underline.style.cssText = `
+          position: absolute;
+          left: ${relativeLeft}px;
+          top: ${relativeTop + lineHeight}px;
+          width: ${lineWidth}px;
+          height: 2px;
+          background-color: #f6ad55;
+          pointer-events: none;
+          z-index: 1;
+        `;
+        messageElement.appendChild(underline);
+        highlights.push(underline);
+      }
+
+      return highlights;
     },
 
     /**
@@ -602,24 +948,405 @@
       }
 
       if (this.pendingAnchor) {
-        await JAL.saveComment(this.pendingAnchor, body);
+        // Save the comment and get the new commentId
+        const comment = JAL.Storage.createComment(
+          JAL.state.pageId,
+          this.pendingAnchor,
+          body,
+          { status: 'draft' }
+        );
+
+        await JAL.Storage.saveComment(comment);
+        JAL.state.comments.push(comment);
+
+        // Convert pending highlights to permanent ones (already merged, just rename)
+        if (this.pendingHighlights && this.pendingHighlights.length > 0) {
+          this.pendingHighlights.forEach(el => {
+            el.dataset.commentId = comment.commentId;
+            // Add click handler with correct commentId
+            if (el.classList.contains('jal-highlight-overlay')) {
+              el.style.pointerEvents = 'auto';
+              el.style.cursor = 'pointer';
+              el.addEventListener('click', (e) => {
+                e.stopPropagation();
+                JAL.UI.showCommentPopup(comment.commentId, e.clientX, e.clientY);
+              });
+              el.addEventListener('mouseenter', () => {
+                document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${comment.commentId}"], .jal-underline[data-comment-id="${comment.commentId}"]`).forEach(h => h.classList.add('jal-hover'));
+              });
+              el.addEventListener('mouseleave', () => {
+                document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${comment.commentId}"], .jal-underline[data-comment-id="${comment.commentId}"]`).forEach(h => h.classList.remove('jal-hover'));
+              });
+            }
+          });
+          JAL.state.ui.highlights.set(comment.commentId, this.pendingHighlights);
+          this.pendingHighlights = null;
+        }
+
+        // Render comments list only (highlights are already created)
+        this.renderCommentsOnly();
+
+        // Clear selection
+        window.getSelection().removeAllRanges();
+
+        // Hide the input
+        this.hideCommentInputWithoutRemovingHighlights();
+
+        // Show the comment popup (will position itself based on highlight)
+        this.showCommentPopup(comment.commentId, 0, 0);
+
+        return; // Exit early since we handled hiding
       }
 
-      this.hideCommentInput();
+      this.hideCommentInputWithoutRemovingHighlights();
+    },
+
+    /**
+     * Render only the comments list, without re-rendering highlights
+     */
+    renderCommentsOnly() {
+      const list = document.getElementById('jal-comments-list');
+      const comments = JAL.state.comments;
+
+      if (comments.length === 0) {
+        list.innerHTML = '<p class="jal-empty">No comments yet. Select text and click "+ Comment" to add one.</p>';
+        return;
+      }
+
+      // Create comment cards
+      list.innerHTML = comments.map(comment => `
+        <div class="jal-comment-card ${comment.status}" data-comment-id="${comment.commentId}">
+          <div class="jal-comment-header">
+            <label class="jal-checkbox">
+              <input type="checkbox" ${JAL.state.selectedComments.has(comment.commentId) ? 'checked' : ''}>
+              <span class="jal-status-badge">${comment.status}</span>
+            </label>
+            <button class="jal-btn-icon jal-delete-btn" title="Delete">×</button>
+          </div>
+          <div class="jal-comment-quote">"${this.escapeHtml(comment.anchor.quoteExact.slice(0, 50))}${comment.anchor.quoteExact.length > 50 ? '...' : ''}"</div>
+          <div class="jal-comment-body">${this.escapeHtml(comment.body)}</div>
+        </div>
+      `).join('');
+
+      // Add event listeners (same as renderComments)
+      list.querySelectorAll('.jal-comment-card').forEach(card => {
+        const commentId = card.dataset.commentId;
+
+        card.querySelector('input[type="checkbox"]').addEventListener('change', (e) => {
+          if (e.target.checked) {
+            JAL.state.selectedComments.add(commentId);
+          } else {
+            JAL.state.selectedComments.delete(commentId);
+          }
+        });
+
+        card.querySelector('.jal-delete-btn').addEventListener('click', async () => {
+          await JAL.Storage.deleteComment(commentId);
+          JAL.state.comments = JAL.state.comments.filter(c => c.commentId !== commentId);
+          JAL.state.selectedComments.delete(commentId);
+          this.renderComments();
+          this.renderHighlights();
+        });
+
+        card.querySelector('.jal-comment-quote').addEventListener('click', () => {
+          const highlight = JAL.state.ui.highlights.get(commentId);
+          if (highlight && highlight.length > 0) {
+            JAL.Utils.scrollToElement(highlight[0], 100);
+            highlight.forEach(el => el.classList.add('jal-flash'));
+            setTimeout(() => highlight.forEach(el => el.classList.remove('jal-flash')), 2000);
+          }
+        });
+
+        card.addEventListener('mouseenter', () => {
+          const highlights = JAL.state.ui.highlights.get(commentId);
+          if (highlights) {
+            highlights.forEach(el => el.classList.add('jal-active'));
+          }
+        });
+
+        card.addEventListener('mouseleave', () => {
+          const highlights = JAL.state.ui.highlights.get(commentId);
+          if (highlights) {
+            highlights.forEach(el => el.classList.remove('jal-active'));
+          }
+        });
+      });
+
+      // Position comments
+      requestAnimationFrame(() => {
+        this.positionComments();
+      });
+    },
+
+    /**
+     * Hide comment input without removing highlights (used after successful save)
+     */
+    hideCommentInputWithoutRemovingHighlights() {
+      const input = document.getElementById('jal-comment-input');
+      input.classList.add('jal-hidden');
+      this.pendingAnchor = null;
+      this.pendingMessage = null;
+      // Don't remove pendingHighlights - they've been converted to permanent
+    },
+
+    /**
+     * Show comment popup when clicking a highlight
+     */
+    showCommentPopup(commentId, x, y) {
+      // Remove any existing popup
+      this.hideCommentPopup();
+
+      // Find the comment
+      const comment = JAL.state.comments.find(c => c.commentId === commentId);
+      if (!comment) return;
+
+      // Get the highlight element to anchor the popup to
+      const highlights = JAL.state.ui.highlights.get(commentId);
+      const highlightEl = highlights && highlights.length > 0 ? highlights[0] : null;
+
+      // Get visual state: draft (orange), added (blue), asked (green)
+      const visualState = JAL.getCommentVisualState(commentId);
+      const isInComposer = visualState === 'added';
+      const isAsked = visualState === 'asked';
+      const canAdd = visualState === 'draft'; // Only draft can be added
+      const canEdit = !isInComposer; // Can edit if not currently in composer
+
+      // Status label for display
+      const statusLabels = {
+        'draft': 'draft',
+        'added': 'added',
+        'asked': 'asked'
+      };
+      const statusLabel = statusLabels[visualState] || comment.status;
+
+      // Tooltip for add button
+      let addTooltip = 'Add to chat';
+      if (isInComposer) addTooltip = 'Already in chat';
+      else if (isAsked) addTooltip = 'Already asked - edit to ask again';
+
+      // Create popup
+      const popup = document.createElement('div');
+      popup.className = `jal-comment-popup jal-state-${visualState}`;
+      popup.id = 'jal-comment-popup';
+      popup.dataset.commentId = commentId;
+      popup.innerHTML = `
+        <div class="jal-popup-header">
+          <span class="jal-status-badge">${statusLabel}</span>
+          <button class="jal-popup-close">&times;</button>
+        </div>
+        <div class="jal-popup-body">${this.escapeHtml(comment.body)}</div>
+        <button class="jal-popup-edit-btn ${!canEdit ? 'jal-disabled' : ''}" title="${!canEdit ? 'Cannot edit while in chat' : 'Edit comment'}" ${!canEdit ? 'disabled' : ''}>✎</button>
+        <button class="jal-popup-add-btn ${!canAdd ? 'jal-disabled' : ''}" title="${addTooltip}" ${!canAdd ? 'disabled' : ''}>+</button>
+      `;
+
+      // Use fixed positioning so popup follows the highlight on scroll
+      popup.style.position = 'fixed';
+
+      document.body.appendChild(popup);
+
+      // Function to position popup relative to highlight
+      const positionPopup = () => {
+        if (!highlightEl) {
+          // Fallback to click position if no highlight
+          popup.style.left = `${x + 10}px`;
+          popup.style.top = `${y + 10}px`;
+          return;
+        }
+
+        const rect = highlightEl.getBoundingClientRect();
+
+        // Hide popup if highlight is out of view
+        const isVisible = rect.bottom > 0 && rect.top < window.innerHeight;
+        if (!isVisible) {
+          popup.style.display = 'none';
+          return;
+        }
+        popup.style.display = '';
+
+        const popupWidth = popup.offsetWidth || 300;
+        const popupHeight = popup.offsetHeight || 150;
+
+        // Position to the right of the highlight
+        let left = rect.right + 10;
+        let top = rect.top;
+
+        // Flip to left side if not enough space on right
+        if (left + popupWidth > window.innerWidth - 20) {
+          left = rect.left - popupWidth - 10;
+        }
+        if (left < 20) left = 20;
+
+        popup.style.left = `${left}px`;
+        popup.style.top = `${top}px`;
+      };
+
+      // Initial position
+      positionPopup();
+
+      // Update position on scroll
+      const scrollContainer = this.findScrollContainer();
+      this._popupScrollHandler = () => {
+        requestAnimationFrame(positionPopup);
+      };
+
+      window.addEventListener('scroll', this._popupScrollHandler, { passive: true });
+      if (scrollContainer && scrollContainer !== window) {
+        scrollContainer.addEventListener('scroll', this._popupScrollHandler, { passive: true });
+      }
+      this._popupScrollContainer = scrollContainer;
+
+      // Close button
+      popup.querySelector('.jal-popup-close').addEventListener('click', () => {
+        this.hideCommentPopup();
+      });
+
+      // Edit button (only if can edit)
+      const editBtn = popup.querySelector('.jal-popup-edit-btn');
+      if (canEdit) {
+        editBtn.addEventListener('click', () => {
+          this.showEditMode(popup, commentId, comment, visualState);
+        });
+      }
+
+      // Add to composer button (only if draft)
+      const addBtn = popup.querySelector('.jal-popup-add-btn');
+      if (canAdd) {
+        addBtn.addEventListener('click', () => {
+          JAL.addCommentToComposer(commentId);
+        });
+      }
+
+      // Close on click outside
+      setTimeout(() => {
+        document.addEventListener('click', this._popupClickOutside = (e) => {
+          if (!popup.contains(e.target) && !e.target.classList.contains('jal-highlight-overlay')) {
+            this.hideCommentPopup();
+          }
+        });
+      }, 10);
+    },
+
+    /**
+     * Show edit mode in the popup
+     */
+    showEditMode(popup, commentId, comment, previousState) {
+      const body = popup.querySelector('.jal-popup-body');
+      const editBtn = popup.querySelector('.jal-popup-edit-btn');
+      const addBtn = popup.querySelector('.jal-popup-add-btn');
+
+      // Add edit mode class to reduce bottom padding
+      popup.classList.add('jal-edit-mode');
+
+      // Replace body with textarea
+      const textarea = document.createElement('textarea');
+      textarea.className = 'jal-popup-edit-textarea';
+      textarea.value = comment.body;
+      body.replaceWith(textarea);
+      textarea.focus();
+      textarea.select();
+
+      // Hide edit and add buttons, show save/cancel
+      editBtn.style.display = 'none';
+      addBtn.style.display = 'none';
+
+      const actions = document.createElement('div');
+      actions.className = 'jal-popup-edit-actions';
+      actions.innerHTML = `
+        <button class="jal-popup-cancel-btn">Cancel</button>
+        <button class="jal-popup-save-btn">Save</button>
+      `;
+      popup.appendChild(actions);
+
+      // Save handler
+      actions.querySelector('.jal-popup-save-btn').addEventListener('click', async () => {
+        const newBody = textarea.value.trim();
+        if (!newBody) {
+          alert('Comment cannot be empty');
+          return;
+        }
+
+        // Update the comment
+        comment.body = newBody;
+
+        // If it was "asked" (green), reset to "draft" (orange)
+        if (previousState === 'asked') {
+          comment.status = 'draft';
+          await JAL.Storage.updateComment(commentId, { body: newBody, status: 'draft' });
+          JAL.UI.updateCommentVisualState(commentId, 'draft');
+        } else {
+          await JAL.Storage.updateComment(commentId, { body: newBody });
+        }
+
+        // Refresh the popup (position will be calculated from highlight)
+        this.hideCommentPopup();
+        this.showCommentPopup(commentId, 0, 0);
+      });
+
+      // Cancel handler
+      actions.querySelector('.jal-popup-cancel-btn').addEventListener('click', () => {
+        // Refresh the popup to original state (position will be calculated from highlight)
+        this.hideCommentPopup();
+        this.showCommentPopup(commentId, 0, 0);
+      });
+    },
+
+    /**
+     * Hide comment popup
+     */
+    hideCommentPopup() {
+      const popup = document.getElementById('jal-comment-popup');
+      if (popup) popup.remove();
+      if (this._popupClickOutside) {
+        document.removeEventListener('click', this._popupClickOutside);
+        this._popupClickOutside = null;
+      }
+      // Clean up scroll listeners
+      if (this._popupScrollHandler) {
+        window.removeEventListener('scroll', this._popupScrollHandler);
+        if (this._popupScrollContainer && this._popupScrollContainer !== window) {
+          this._popupScrollContainer.removeEventListener('scroll', this._popupScrollHandler);
+        }
+        this._popupScrollHandler = null;
+        this._popupScrollContainer = null;
+      }
+    },
+
+    /**
+     * Update the visual state of a comment (highlights and underlines)
+     * States: 'draft' (orange), 'added' (blue), 'asked' (green)
+     */
+    updateCommentVisualState(commentId, state) {
+      const highlights = JAL.state.ui.highlights.get(commentId);
+      if (!highlights) return;
+
+      // Color mapping for each state
+      const colors = {
+        draft: { highlight: 'rgba(255, 220, 100, 0.5)', underline: '#f6ad55' },  // orange
+        added: { highlight: 'rgba(100, 180, 255, 0.5)', underline: '#4299e1' },  // blue
+        asked: { highlight: 'rgba(100, 220, 150, 0.5)', underline: '#48bb78' }   // green
+      };
+
+      const colorSet = colors[state] || colors.draft;
+
+      highlights.forEach(el => {
+        if (el.classList.contains('jal-highlight-overlay')) {
+          el.style.backgroundColor = colorSet.highlight;
+          el.dataset.visualState = state;
+        } else if (el.classList.contains('jal-underline')) {
+          el.style.backgroundColor = colorSet.underline;
+          el.dataset.visualState = state;
+        }
+      });
     },
 
     /**
      * Render comments in the margin, aligned with their highlights
      */
     renderComments() {
-      console.log('JAL DEBUG: renderComments called');
       const list = document.getElementById('jal-comments-list');
-      console.log('JAL DEBUG: comments list element:', list);
       const comments = JAL.state.comments;
-      console.log('JAL DEBUG: comments to render:', comments.length, comments);
 
       if (comments.length === 0) {
-        console.log('JAL DEBUG: No comments, showing empty state');
         list.innerHTML = '<p class="jal-empty">No comments yet. Select text and click "+ Comment" to add one.</p>';
         return;
       }
@@ -695,87 +1422,39 @@
      * Position comment cards in the margin aligned with their highlights
      */
     positionComments() {
-      console.log('JAL DEBUG: positionComments called');
       const list = document.getElementById('jal-comments-list');
-      console.log('JAL DEBUG: list element:', list);
       const cards = list.querySelectorAll('.jal-comment-card');
-      console.log('JAL DEBUG: found cards:', cards.length);
-
-      // Collect positions for all comments
       const positions = [];
 
       cards.forEach(card => {
         const commentId = card.dataset.commentId;
-        console.log('JAL DEBUG: processing card for commentId:', commentId);
         const highlights = JAL.state.ui.highlights.get(commentId);
-        console.log('JAL DEBUG: highlights for this comment:', highlights);
 
         if (highlights && highlights.length > 0) {
-          // Get the position of the first highlight element
-          const firstHighlight = highlights[0];
-          console.log('JAL DEBUG: first highlight element:', firstHighlight);
-          const rect = firstHighlight.getBoundingClientRect();
-          console.log('JAL DEBUG: highlight rect:', rect);
-          const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-          console.log('JAL DEBUG: scrollTop:', scrollTop);
+          // getBoundingClientRect returns viewport-relative position
+          // Since our container is position:fixed, we use viewport-relative positions directly
+          const rect = highlights[0].getBoundingClientRect();
+          let targetTop = rect.top;
+          if (targetTop < 8) targetTop = 8;
 
-          const targetTop = rect.top + scrollTop;
-          console.log('JAL DEBUG: calculated targetTop:', targetTop);
-
-          positions.push({
-            card,
-            commentId,
-            targetTop: targetTop, // Absolute position on page
-            height: 0 // Will be calculated after initial positioning
-          });
+          positions.push({ card, commentId, targetTop, height: 0 });
         } else {
-          // No highlight found - hide the card or position at end
-          console.log('JAL DEBUG: no highlights found for card, hiding');
           card.style.display = 'none';
         }
       });
 
-      console.log('JAL DEBUG: positions collected:', positions.length, positions);
-
-      // Sort by target position (top to bottom)
       positions.sort((a, b) => a.targetTop - b.targetTop);
 
-      // Position cards with overlap handling
       let lastBottom = 0;
-      const minGap = 8; // Minimum gap between cards
-
+      const minGap = 8;
       positions.forEach(pos => {
-        pos.card.style.display = ''; // Ensure visible
-
-        // Calculate actual top position, avoiding overlaps
+        pos.card.style.display = '';
         let actualTop = pos.targetTop;
         if (actualTop < lastBottom + minGap) {
           actualTop = lastBottom + minGap;
         }
-
-        console.log('JAL DEBUG: positioning card at top:', actualTop);
         pos.card.style.top = `${actualTop}px`;
-
-        // Update lastBottom for next card
-        const cardHeight = pos.card.offsetHeight;
-        console.log('JAL DEBUG: card height:', cardHeight);
-        lastBottom = actualTop + cardHeight;
-      });
-
-      console.log('JAL DEBUG: positionComments complete');
-
-      // Final debug: check actual rendered positions
-      cards.forEach(card => {
-        const rect = card.getBoundingClientRect();
-        const cs = window.getComputedStyle(card);
-        console.log('JAL DEBUG: card final state:', {
-          commentId: card.dataset.commentId,
-          boundingRect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
-          computedTop: cs.top,
-          computedDisplay: cs.display,
-          computedVisibility: cs.visibility,
-          computedOpacity: cs.opacity
-        });
+        lastBottom = actualTop + pos.card.offsetHeight;
       });
     },
 
@@ -783,11 +1462,10 @@
      * Render highlights for all comments
      */
     renderHighlights() {
-      console.log('JAL DEBUG: ========= renderHighlights START =========');
-      console.log('JAL DEBUG: renderHighlights called, comments:', JAL.state.comments.length);
-      console.log('JAL DEBUG: comments array:', JAL.state.comments);
+      console.log('=== JAL DEBUG: renderHighlights ===');
+      console.log('JAL DEBUG: Total comments to render:', JAL.state.comments.length);
 
-      // Clear existing mark highlights
+      // Clear existing highlights
       document.querySelectorAll('mark.jal-highlight').forEach(el => {
         const parent = el.parentNode;
         if (parent) {
@@ -795,172 +1473,612 @@
             parent.insertBefore(el.firstChild, el);
           }
           parent.removeChild(el);
-          // Normalize to merge adjacent text nodes
           parent.normalize();
         }
       });
-
-      // Clear element highlights (for equations, etc.)
-      document.querySelectorAll('.jal-highlight-element').forEach(el => {
-        el.classList.remove('jal-highlight-element');
-        delete el.dataset.jalCommentId;
-        el.style.removeProperty('background');
-        el.style.removeProperty('outline');
-        el.style.removeProperty('outline-offset');
-        el.style.removeProperty('border-radius');
-      });
-
+      document.querySelectorAll('.jal-highlight-overlay, .jal-underline').forEach(el => el.remove());
       JAL.state.ui.highlights.clear();
 
       const messages = JAL.state.adapter.getAssistantMessages();
-      console.log('JAL: Found messages:', messages.length);
+      console.log('JAL DEBUG: Found', messages.length, 'assistant messages');
+
+      // Mark all messages NOW (ensure fingerprints exist before matching)
+      messages.forEach(msg => {
+        JAL.state.adapter.markMessage(msg);
+      });
+
+      // Log message fingerprints
+      messages.forEach((m, i) => {
+        const fp = m.getAttribute('data-jal-message');
+        console.log(`JAL DEBUG: Message ${i} fingerprint:`, fp);
+      });
 
       for (const comment of JAL.state.comments) {
-        console.log('JAL: Processing comment:', comment.commentId, 'fingerprint:', comment.anchor.messageFingerprint);
+        console.log('JAL DEBUG: Looking for message with fingerprint:', comment.anchor.messageFingerprint);
 
-        // Find the message this comment belongs to
         const targetMessage = messages.find(m =>
           m.getAttribute('data-jal-message') === comment.anchor.messageFingerprint
         );
 
         if (!targetMessage) {
-          console.log('JAL: No target message found for comment');
+          console.log('JAL DEBUG: ❌ Message NOT FOUND for comment:', comment.commentId);
           continue;
         }
-        console.log('JAL: Found target message');
+        console.log('JAL DEBUG: ✓ Found message for comment:', comment.commentId);
 
-        // Create range for the anchor
         const range = JAL.Anchoring.createRangeForAnchor(comment.anchor, targetMessage);
-
         if (!range) {
-          console.log('JAL: Could not create range for anchor');
+          console.log('JAL: Could not create range for comment', comment.commentId);
           continue;
         }
-        console.log('JAL: Created range:', range);
 
-        // Highlight the range
         const highlights = this.highlightRange(range, comment.commentId);
         JAL.state.ui.highlights.set(comment.commentId, highlights);
+
+        // Set initial visual state based on comment status
+        const visualState = JAL.getCommentVisualState(comment.commentId);
+        console.log('JAL DEBUG: Setting visual state for', comment.commentId, '- status:', comment.status, '-> visualState:', visualState);
+        this.updateCommentVisualState(comment.commentId, visualState);
       }
 
-      // Position comments in margin after highlights are rendered
-      // Use requestAnimationFrame to ensure DOM has updated
-      console.log('JAL DEBUG: scheduling positionComments via requestAnimationFrame');
       requestAnimationFrame(() => {
-        console.log('JAL DEBUG: requestAnimationFrame callback executing');
         this.positionComments();
         this.setupPositionHandlers();
       });
     },
 
     /**
-     * Highlight a range by wrapping text nodes in mark elements
-     * Falls back to adding highlight class to elements for non-text content (equations, etc.)
+     * Find the scroll container that ChatGPT uses
+     */
+    findScrollContainer() {
+      // Walk up from message to find scrolling ancestor
+      const messages = JAL.state.adapter?.getAssistantMessages() || [];
+      if (messages.length > 0) {
+        let el = messages[0];
+        while (el && el !== document.body) {
+          const style = getComputedStyle(el);
+          if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && el.scrollHeight > el.clientHeight) {
+            return el;
+          }
+          el = el.parentElement;
+        }
+      }
+
+      // Fallback selectors
+      const selectors = [
+        '[class*="react-scroll-to-bottom"] > div',
+        'main [class*="overflow-y-auto"]',
+        'main [class*="overflow-auto"]',
+        'main'
+      ];
+      for (const selector of selectors) {
+        const el = document.querySelector(selector);
+        if (el) {
+          const style = getComputedStyle(el);
+          if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && el.scrollHeight > el.clientHeight) {
+            return el;
+          }
+        }
+      }
+      return document.documentElement;
+    },
+
+    /**
+     * Highlight a range with LINE-BY-LINE highlights
+     * Groups rects by line and creates one highlight per line
+     * Positions relative to the MESSAGE ELEMENT for stability
      */
     highlightRange(range, commentId) {
       const highlights = [];
 
       try {
-        // First, check if the range contains or is near equation elements
-        // If so, prefer highlighting those directly instead of text nodes
-        const equationElements = this.findEquationElementsNearRange(range);
-        if (equationElements.length > 0) {
-          console.log('JAL: Found equation elements in range:', equationElements);
-          for (const el of equationElements) {
-            this.highlightEquationElement(el, commentId);
-            highlights.push(el);
-          }
+        const messageElement = JAL.state.adapter.findMessageContainer(range.commonAncestorContainer);
+        if (!messageElement) {
+          console.log('JAL: No message element for highlight');
           return highlights;
         }
 
-        // Get all text nodes within the range
-        const textNodes = this.getTextNodesInRange(range);
+        if (getComputedStyle(messageElement).position === 'static') {
+          messageElement.style.position = 'relative';
+        }
+        // Force reflow to ensure position change is applied before measuring
+        messageElement.offsetHeight;
+        const messageRect = messageElement.getBoundingClientRect();
 
-        if (textNodes.length > 0) {
-          // Wrap text nodes
-          for (const { node, start, end } of textNodes) {
-            const nodeRange = document.createRange();
-            nodeRange.setStart(node, start);
-            nodeRange.setEnd(node, end);
+        // Step 1: Get rects - expand partial equation selections to full equations
+        // Helper: check if a node is inside an equation element
+        const getEquationAncestor = (node) => {
+          let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+          while (el && el !== messageElement) {
+            if (el.classList?.contains('katex') ||
+                el.classList?.contains('math') ||
+                el.tagName === 'MJX-CONTAINER' ||
+                el.tagName === 'MATH' ||
+                el.closest('.katex, .math, mjx-container, math')) {
+              return el.closest('.katex, .math, mjx-container, math') || el;
+            }
+            el = el.parentElement;
+          }
+          return null;
+        };
 
-            const mark = document.createElement('mark');
-            mark.className = 'jal-highlight';
-            mark.dataset.commentId = commentId;
-            // Force inline styles to override any site CSS
-            mark.style.setProperty('background', 'rgba(255, 220, 100, 0.5)', 'important');
-            mark.style.setProperty('background-color', 'rgba(255, 220, 100, 0.5)', 'important');
-            mark.style.setProperty('border-bottom', '2px solid #f6ad55', 'important');
-            mark.style.setProperty('padding', '0', 'important');
-            mark.style.setProperty('margin', '0', 'important');
-            mark.style.setProperty('display', 'inline', 'important');
-            mark.style.setProperty('color', 'inherit', 'important');
+        // Helper: get the tight bounding rect of equation content (not the full-width container)
+        const getEquationContentRect = (equationEl) => {
+          let minLeft = Infinity, minTop = Infinity, maxRight = -Infinity, maxBottom = -Infinity;
 
-            try {
-              nodeRange.surroundContents(mark);
-              console.log('JAL: Wrapped text node:', mark, 'parent:', mark.parentElement);
-              highlights.push(mark);
+          // First try: get all .base elements (KaTeX actual content)
+          const bases = equationEl.querySelectorAll('.base');
+          if (bases.length > 0) {
+            bases.forEach(base => {
+              const rect = base.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) {
+                minLeft = Math.min(minLeft, rect.left);
+                minTop = Math.min(minTop, rect.top);
+                maxRight = Math.max(maxRight, rect.right);
+                maxBottom = Math.max(maxBottom, rect.bottom);
+              }
+            });
+            if (minLeft !== Infinity) {
+              return { left: minLeft, top: minTop, right: maxRight, bottom: maxBottom };
+            }
+          }
 
-              // Add hover/click interaction to highlight corresponding comment
-              mark.addEventListener('mouseenter', () => {
-                const card = document.querySelector(`.jal-comment-card[data-comment-id="${commentId}"]`);
-                if (card) card.classList.add('jal-active');
+          // Second try: use getClientRects() on the equation element
+          const rects = equationEl.getClientRects();
+          if (rects.length > 0) {
+            for (const rect of rects) {
+              if (rect.width > 0 && rect.height > 0) {
+                minLeft = Math.min(minLeft, rect.left);
+                minTop = Math.min(minTop, rect.top);
+                maxRight = Math.max(maxRight, rect.right);
+                maxBottom = Math.max(maxBottom, rect.bottom);
+              }
+            }
+            if (minLeft !== Infinity) {
+              return { left: minLeft, top: minTop, right: maxRight, bottom: maxBottom };
+            }
+          }
+
+          // Third try: find all text-containing leaf spans
+          const spans = equationEl.querySelectorAll('span');
+          spans.forEach(span => {
+            if (span.children.length === 0 && span.textContent.trim()) {
+              const rect = span.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0 && rect.width < 500) {
+                minLeft = Math.min(minLeft, rect.left);
+                minTop = Math.min(minTop, rect.top);
+                maxRight = Math.max(maxRight, rect.right);
+                maxBottom = Math.max(maxBottom, rect.bottom);
+              }
+            }
+          });
+          if (minLeft !== Infinity) {
+            return { left: minLeft, top: minTop, right: maxRight, bottom: maxBottom };
+          }
+
+          return equationEl.getBoundingClientRect();
+        };
+
+        const charRects = [];
+        const processedEquations = new Set();
+
+        const walker = document.createTreeWalker(
+          range.commonAncestorContainer.nodeType === Node.TEXT_NODE
+            ? range.commonAncestorContainer.parentNode
+            : range.commonAncestorContainer,
+          NodeFilter.SHOW_TEXT,
+          null,
+          false
+        );
+
+        let node;
+        while (node = walker.nextNode()) {
+          if (!range.intersectsNode(node)) continue;
+
+          const equationEl = getEquationAncestor(node);
+
+          if (equationEl) {
+            // Include the WHOLE equation (but only once)
+            if (processedEquations.has(equationEl)) continue;
+            processedEquations.add(equationEl);
+
+            const eqRect = getEquationContentRect(equationEl);
+            const eqWidth = eqRect.right - eqRect.left;
+            const eqHeight = eqRect.bottom - eqRect.top;
+            if (eqWidth > 0 && eqHeight > 0) {
+              charRects.push({
+                left: eqRect.left,
+                right: eqRect.right,
+                top: eqRect.top,
+                bottom: eqRect.bottom
               });
-              mark.addEventListener('mouseleave', () => {
-                const card = document.querySelector(`.jal-comment-card[data-comment-id="${commentId}"]`);
-                if (card) card.classList.remove('jal-active');
-              });
-              mark.addEventListener('click', () => {
-                const card = document.querySelector(`.jal-comment-card[data-comment-id="${commentId}"]`);
-                if (card) {
-                  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                  card.classList.add('jal-flash');
-                  setTimeout(() => card.classList.remove('jal-flash'), 2000);
+            }
+          } else {
+            // Regular text - character by character
+            const text = node.textContent;
+            if (!text || text.length === 0) continue;
+
+            for (let i = 0; i < text.length; i++) {
+              try {
+                if (range.comparePoint(node, i) < 0) continue;
+                if (range.comparePoint(node, i) > 0) break;
+              } catch (e) {
+                continue;
+              }
+
+              const charRange = document.createRange();
+              charRange.setStart(node, i);
+              charRange.setEnd(node, Math.min(i + 1, text.length));
+
+              const rects = charRange.getClientRects();
+              for (const rect of rects) {
+                if (rect.width > 0 && rect.height > 0) {
+                  charRects.push({
+                    left: rect.left,
+                    right: rect.right,
+                    top: rect.top,
+                    bottom: rect.bottom
+                  });
                 }
-              });
-            } catch (e) {
-              console.warn('JAL: Could not wrap text node', e);
+              }
             }
           }
         }
 
-        // If no text nodes found or wrapped, highlight element nodes directly
-        if (highlights.length === 0) {
-          const elements = this.getElementsInRange(range);
-          console.log('JAL: No text nodes, highlighting elements:', elements);
-          for (const el of elements) {
-            el.classList.add('jal-highlight-element');
-            el.dataset.jalCommentId = commentId;
-            // Force inline styles for equation elements that might override CSS
-            el.style.setProperty('background', 'rgba(255, 220, 100, 0.4)', 'important');
-            el.style.setProperty('outline', '2px solid #f6ad55', 'important');
-            el.style.setProperty('outline-offset', '2px', 'important');
-            el.style.setProperty('border-radius', '4px', 'important');
-            highlights.push(el);
+        let lines = charRects;
 
-            // Add hover/click interaction to highlight corresponding comment
-            el.addEventListener('mouseenter', () => {
-              const card = document.querySelector(`.jal-comment-card[data-comment-id="${commentId}"]`);
-              if (card) card.classList.add('jal-active');
-            });
-            el.addEventListener('mouseleave', () => {
-              const card = document.querySelector(`.jal-comment-card[data-comment-id="${commentId}"]`);
-              if (card) card.classList.remove('jal-active');
-            });
-            el.addEventListener('click', (e) => {
-              e.stopPropagation();
-              const card = document.querySelector(`.jal-comment-card[data-comment-id="${commentId}"]`);
-              if (card) {
-                card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                card.classList.add('jal-flash');
-                setTimeout(() => card.classList.remove('jal-flash'), 2000);
+        // If character-level detection failed, fall back to getClientRects
+        if (lines.length === 0) {
+          const rects = range.getClientRects();
+          lines = [...rects]
+            .filter(r => r.width > 0 && r.height > 0)
+            .map(r => ({ left: r.left, right: r.right, top: r.top, bottom: r.bottom }));
+        }
+
+        if (lines.length === 0) return highlights;
+
+        console.log(`JAL DEBUG: ${lines.length} raw rects before merge`);
+
+        // SIMPLE MERGE: Group segments on the SAME line (significant Y overlap), then bounding box per group
+        // "Same line" = centers are close together (within half the height of smaller segment)
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (let i = 0; i < lines.length; i++) {
+            for (let j = i + 1; j < lines.length; j++) {
+              const a = lines[i];
+              const b = lines[j];
+
+              // Check if segments are on the same line:
+              // Their vertical centers should be close (within half the smaller height)
+              const centerA = (a.top + a.bottom) / 2;
+              const centerB = (b.top + b.bottom) / 2;
+              const heightA = a.bottom - a.top;
+              const heightB = b.bottom - b.top;
+              const smallerHeight = Math.min(heightA, heightB);
+              const centerDistance = Math.abs(centerA - centerB);
+
+              // Same line if centers are within half the smaller segment's height
+              const sameLine = centerDistance < smallerHeight / 2;
+
+              if (sameLine) {
+                // Merge into bounding box: leftmost, rightmost, topmost, bottommost
+                const merged = {
+                  left: Math.min(a.left, b.left),
+                  right: Math.max(a.right, b.right),
+                  top: Math.min(a.top, b.top),
+                  bottom: Math.max(a.bottom, b.bottom)
+                };
+                // Remove both, add merged
+                lines.splice(j, 1);
+                lines.splice(i, 1);
+                lines.push(merged);
+                changed = true;
+                break;
               }
-            });
+            }
+            if (changed) break;
           }
         }
 
-        console.log('JAL: Created highlights:', highlights.length);
+        console.log(`JAL DEBUG: ${lines.length} lines after merge`);
+
+        // Now lines contains one bounding box per line - no going over
+        for (const line of lines) {
+          const lineHeight = line.bottom - line.top;
+          const lineWidth = line.right - line.left;
+          const relativeTop = line.top - messageRect.top;
+          const relativeLeft = line.left - messageRect.left;
+
+          // Create highlight for this line
+          const highlight = document.createElement('div');
+          highlight.className = 'jal-highlight-overlay';
+          highlight.dataset.commentId = commentId;
+          highlight.style.cssText = `
+            position: absolute;
+            left: ${relativeLeft}px;
+            top: ${relativeTop}px;
+            width: ${lineWidth}px;
+            height: ${lineHeight}px;
+            background-color: rgba(255, 220, 100, 0.5);
+            pointer-events: auto;
+            cursor: pointer;
+            z-index: 1;
+            mix-blend-mode: multiply;
+          `;
+
+          highlight.addEventListener('click', (e) => {
+            e.stopPropagation();
+            JAL.UI.showCommentPopup(commentId, e.clientX, e.clientY);
+          });
+
+          // Hover all lines of the same comment together
+          highlight.addEventListener('mouseenter', (e) => {
+            const cid = e.target.dataset.commentId;
+            document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${cid}"], .jal-underline[data-comment-id="${cid}"]`).forEach(el => {
+              el.classList.add('jal-hover');
+            });
+          });
+          highlight.addEventListener('mouseleave', (e) => {
+            const cid = e.target.dataset.commentId;
+            document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${cid}"], .jal-underline[data-comment-id="${cid}"]`).forEach(el => {
+              el.classList.remove('jal-hover');
+            });
+          });
+
+          // Append to message element - this is stable and scrolls with content
+          messageElement.appendChild(highlight);
+          highlights.push(highlight);
+
+          // Create underline at bottom of this line
+          const underline = document.createElement('div');
+          underline.className = 'jal-underline';
+          underline.dataset.commentId = commentId;
+          underline.style.cssText = `
+            position: absolute;
+            left: ${relativeLeft}px;
+            top: ${relativeTop + lineHeight}px;
+            width: ${lineWidth}px;
+            height: 2px;
+            background-color: #f6ad55;
+            pointer-events: none;
+            z-index: 1;
+          `;
+          messageElement.appendChild(underline);
+          highlights.push(underline);
+        }
       } catch (e) {
-        console.warn('JAL: Could not highlight range', e);
+        console.error('JAL highlightRange error:', e);
+      }
+
+      return highlights;
+    },
+
+    /**
+     * Highlight a range WITHOUT merging - shows raw character-level rects for debugging
+     * Each character/segment gets its own highlight with alternating colors
+     */
+    highlightRangeUnmerged(range, commentId) {
+      const highlights = [];
+
+      try {
+        const messageElement = JAL.state.adapter.findMessageContainer(range.commonAncestorContainer);
+        if (!messageElement) {
+          console.log('JAL: No message element for highlight');
+          return highlights;
+        }
+
+        if (getComputedStyle(messageElement).position === 'static') {
+          messageElement.style.position = 'relative';
+        }
+        messageElement.offsetHeight;
+        const messageRect = messageElement.getBoundingClientRect();
+
+        // Helper: check if a node is inside an equation element
+        const getEquationAncestor = (node) => {
+          let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+          while (el && el !== messageElement) {
+            // Common equation selectors: KaTeX, MathJax, etc.
+            if (el.classList?.contains('katex') ||
+                el.classList?.contains('math') ||
+                el.tagName === 'MJX-CONTAINER' ||
+                el.tagName === 'MATH' ||
+                el.closest('.katex, .math, mjx-container, math')) {
+              // Return the outermost equation container
+              return el.closest('.katex, .math, mjx-container, math') || el;
+            }
+            el = el.parentElement;
+          }
+          return null;
+        };
+
+        // Helper: get the tight bounding rect of equation content (not the full-width container)
+        const getEquationContentRect = (equationEl) => {
+          // Try to find the actual content element (not full-width containers)
+          // KaTeX uses .base for actual content, or look for spans with content
+          const contentSelectors = ['.base', '.mord', '.minner', 'svg'];
+
+          let minLeft = Infinity, minTop = Infinity, maxRight = -Infinity, maxBottom = -Infinity;
+
+          // First try: get all .base elements (KaTeX actual content)
+          const bases = equationEl.querySelectorAll('.base');
+          if (bases.length > 0) {
+            bases.forEach(base => {
+              const rect = base.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) {
+                minLeft = Math.min(minLeft, rect.left);
+                minTop = Math.min(minTop, rect.top);
+                maxRight = Math.max(maxRight, rect.right);
+                maxBottom = Math.max(maxBottom, rect.bottom);
+              }
+            });
+            if (minLeft !== Infinity) {
+              return { left: minLeft, top: minTop, right: maxRight, bottom: maxBottom, width: maxRight - minLeft, height: maxBottom - minTop };
+            }
+          }
+
+          // Second try: use getClientRects() on the equation element itself
+          const rects = equationEl.getClientRects();
+          if (rects.length > 0) {
+            for (const rect of rects) {
+              if (rect.width > 0 && rect.height > 0) {
+                minLeft = Math.min(minLeft, rect.left);
+                minTop = Math.min(minTop, rect.top);
+                maxRight = Math.max(maxRight, rect.right);
+                maxBottom = Math.max(maxBottom, rect.bottom);
+              }
+            }
+            if (minLeft !== Infinity) {
+              return { left: minLeft, top: minTop, right: maxRight, bottom: maxBottom, width: maxRight - minLeft, height: maxBottom - minTop };
+            }
+          }
+
+          // Third try: find all text-containing leaf spans
+          const spans = equationEl.querySelectorAll('span');
+          spans.forEach(span => {
+            // Only consider spans that directly contain text (leaf nodes)
+            if (span.children.length === 0 && span.textContent.trim()) {
+              const rect = span.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0 && rect.width < 500) { // Skip full-width containers
+                minLeft = Math.min(minLeft, rect.left);
+                minTop = Math.min(minTop, rect.top);
+                maxRight = Math.max(maxRight, rect.right);
+                maxBottom = Math.max(maxBottom, rect.bottom);
+              }
+            }
+          });
+          if (minLeft !== Infinity) {
+            return { left: minLeft, top: minTop, right: maxRight, bottom: maxBottom, width: maxRight - minLeft, height: maxBottom - minTop };
+          }
+
+          // Last resort: use the container rect
+          return equationEl.getBoundingClientRect();
+        };
+
+        const charRects = [];
+        const processedEquations = new Set(); // Track equations we've already fully included
+
+        const walker = document.createTreeWalker(
+          range.commonAncestorContainer.nodeType === Node.TEXT_NODE
+            ? range.commonAncestorContainer.parentNode
+            : range.commonAncestorContainer,
+          NodeFilter.SHOW_TEXT,
+          null,
+          false
+        );
+
+        let node;
+        while (node = walker.nextNode()) {
+          if (!range.intersectsNode(node)) continue;
+
+          // Check if this node is inside an equation
+          const equationEl = getEquationAncestor(node);
+
+          if (equationEl) {
+            // This is part of an equation - include the WHOLE equation (but only once)
+            if (processedEquations.has(equationEl)) continue;
+            processedEquations.add(equationEl);
+
+            // Get the tight bounding rect of the equation content (not full line width)
+            const eqRect = getEquationContentRect(equationEl);
+            const eqWidth = eqRect.right - eqRect.left;
+            const eqHeight = eqRect.bottom - eqRect.top;
+            if (eqWidth > 0 && eqHeight > 0) {
+              charRects.push({
+                left: eqRect.left,
+                right: eqRect.right,
+                top: eqRect.top,
+                bottom: eqRect.bottom
+              });
+              console.log(`JAL: Expanded to full equation: ${equationEl.textContent?.slice(0, 30)}...`);
+            }
+          } else {
+            // Regular text - process character by character
+            const text = node.textContent;
+            if (!text || text.length === 0) continue;
+
+            for (let i = 0; i < text.length; i++) {
+              try {
+                if (range.comparePoint(node, i) < 0) continue;
+                if (range.comparePoint(node, i) > 0) break;
+              } catch (e) {
+                continue;
+              }
+
+              const charRange = document.createRange();
+              charRange.setStart(node, i);
+              charRange.setEnd(node, Math.min(i + 1, text.length));
+
+              const rects = charRange.getClientRects();
+              for (const rect of rects) {
+                if (rect.width > 0 && rect.height > 0) {
+                  charRects.push({
+                    left: rect.left,
+                    right: rect.right,
+                    top: rect.top,
+                    bottom: rect.bottom
+                  });
+                }
+              }
+            }
+          }
+        }
+
+        console.log(`JAL DEBUG: found ${charRects.length} rects (${processedEquations.size} full equations)`);
+
+        // Fallback to getClientRects if no character rects found
+        let lines = charRects;
+        if (lines.length === 0) {
+          const rects = range.getClientRects();
+          lines = [...rects]
+            .filter(r => r.width > 0 && r.height > 0)
+            .map(r => ({ left: r.left, right: r.right, top: r.top, bottom: r.bottom }));
+        }
+
+        if (lines.length === 0) return highlights;
+
+        // NO MERGING - create highlight for each raw rect
+        // Use alternating colors to distinguish segments
+        const colors = [
+          'rgba(255, 100, 100, 0.5)',  // red
+          'rgba(100, 255, 100, 0.5)',  // green
+          'rgba(100, 100, 255, 0.5)',  // blue
+          'rgba(255, 255, 100, 0.5)',  // yellow
+          'rgba(255, 100, 255, 0.5)',  // magenta
+          'rgba(100, 255, 255, 0.5)',  // cyan
+        ];
+
+        lines.forEach((line, index) => {
+          const lineHeight = line.bottom - line.top;
+          const lineWidth = line.right - line.left;
+          const relativeTop = line.top - messageRect.top;
+          const relativeLeft = line.left - messageRect.left;
+          const color = colors[index % colors.length];
+
+          const highlight = document.createElement('div');
+          highlight.className = 'jal-highlight-overlay';
+          highlight.dataset.commentId = commentId;
+          highlight.style.cssText = `
+            position: absolute;
+            left: ${relativeLeft}px;
+            top: ${relativeTop}px;
+            width: ${lineWidth}px;
+            height: ${lineHeight}px;
+            background-color: ${color};
+            pointer-events: none;
+            z-index: 1;
+            mix-blend-mode: multiply;
+            border: 1px solid rgba(0,0,0,0.3);
+          `;
+
+          messageElement.appendChild(highlight);
+          highlights.push(highlight);
+        });
+
+        console.log(`JAL DEBUG: ${lines.length} raw character rects detected`);
+
+      } catch (e) {
+        console.error('JAL highlightRangeUnmerged error:', e);
       }
 
       return highlights;
@@ -973,7 +2091,12 @@
       if (this._positionHandlersSetup) return;
       this._positionHandlersSetup = true;
 
-      // Debounced reposition function
+      // Reposition function (called on scroll - needs to be fast)
+      const repositionNow = () => {
+        this.positionComments();
+      };
+
+      // Debounced reposition for less frequent events
       let repositionTimeout;
       const debouncedReposition = () => {
         clearTimeout(repositionTimeout);
@@ -984,6 +2107,27 @@
 
       // Reposition on window resize
       window.addEventListener('resize', debouncedReposition);
+
+      // Reposition on scroll - use requestAnimationFrame for smooth scrolling
+      let scrollTicking = false;
+      const handleScroll = () => {
+        if (!scrollTicking) {
+          requestAnimationFrame(() => {
+            repositionNow();
+            scrollTicking = false;
+          });
+          scrollTicking = true;
+        }
+      };
+
+      // Listen to scroll on window
+      window.addEventListener('scroll', handleScroll, { passive: true });
+
+      // Also listen to scroll on the ChatGPT scroll container
+      const scrollContainer = this.findScrollContainer();
+      if (scrollContainer && scrollContainer !== window) {
+        scrollContainer.addEventListener('scroll', handleScroll, { passive: true });
+      }
 
       // Also observe mutations in the main content area
       // (for when messages load/change)
@@ -1038,122 +2182,41 @@
     },
 
     /**
-     * Find equation elements (KaTeX, MathJax, etc.) near a range
+     * Find equation elements that are ACTUALLY SELECTED (intersected by range)
+     * Only returns top-level equation elements that the range passes through
      */
-    findEquationElementsNearRange(range) {
-      const equationSelectors = [
-        '.katex',
-        '.MathJax',
-        '.MathJax_Display',
-        'mjx-container',
-        '.math-inline',
-        '.math-display',
-        '[class*="math"]',
-        '[class*="equation"]',
-        'annotation[encoding*="tex"]'
-      ].join(', ');
-
+    findEquationElementsInRange(range) {
+      // Only look for top-level equation containers
+      const topLevelSelectors = '.katex, .MathJax, .MathJax_Display, mjx-container';
       const elements = [];
-      const container = range.commonAncestorContainer;
 
-      // Get the search context - either the element container or its parent
-      let searchContext;
-      if (container.nodeType === Node.TEXT_NODE) {
-        searchContext = container.parentElement;
-      } else {
-        searchContext = container;
+      // Check if selection actually contains equation elements
+      const container = range.commonAncestorContainer;
+      let searchContext = container.nodeType === Node.TEXT_NODE ? container.parentElement : container;
+
+      // Check if the range's common ancestor IS an equation
+      const ancestorEquation = searchContext?.closest(topLevelSelectors);
+      if (ancestorEquation && !ancestorEquation.classList.contains('jal-highlight-element')) {
+        elements.push(ancestorEquation);
+        return elements;
       }
 
-      // Also check ancestors up to 3 levels for equations
-      let checkElement = searchContext;
-      for (let i = 0; i < 4 && checkElement && checkElement !== document.body; i++) {
-        // Check if this element itself is an equation
-        if (checkElement.matches && checkElement.matches(equationSelectors)) {
-          elements.push(checkElement);
-          return elements; // Found equation ancestor, return it
-        }
+      // Find equations within the range that are actually selected
+      if (searchContext) {
+        const equations = searchContext.querySelectorAll(topLevelSelectors);
+        for (const eq of equations) {
+          // Must actually intersect with the range (not just nearby)
+          if (!range.intersectsNode(eq)) continue;
+          // Skip if already highlighted
+          if (eq.classList.contains('jal-highlight-element')) continue;
+          // Only top-level equations
+          if (eq.closest(topLevelSelectors) !== eq) continue;
 
-        // Check for equation children within this element
-        const equationChildren = checkElement.querySelectorAll(equationSelectors);
-        if (equationChildren.length > 0) {
-          // Check if any of these intersect with our range
-          for (const eq of equationChildren) {
-            if (range.intersectsNode(eq) || this.isNodeNearRange(eq, range, 50)) {
-              elements.push(eq);
-            }
-          }
-          if (elements.length > 0) {
-            return elements;
-          }
+          elements.push(eq);
         }
-
-        checkElement = checkElement.parentElement;
       }
 
       return elements;
-    },
-
-    /**
-     * Check if a node is near a range (within pixel distance)
-     */
-    isNodeNearRange(node, range, maxDistance) {
-      try {
-        const nodeRect = node.getBoundingClientRect();
-        const rangeRect = range.getBoundingClientRect();
-
-        // Check if they're close enough
-        const horizontalDist = Math.min(
-          Math.abs(nodeRect.left - rangeRect.right),
-          Math.abs(rangeRect.left - nodeRect.right)
-        );
-        const verticalDist = Math.min(
-          Math.abs(nodeRect.top - rangeRect.bottom),
-          Math.abs(rangeRect.top - nodeRect.bottom)
-        );
-
-        // If ranges overlap, distance is 0
-        const overlap = !(nodeRect.right < rangeRect.left ||
-                         nodeRect.left > rangeRect.right ||
-                         nodeRect.bottom < rangeRect.top ||
-                         nodeRect.top > rangeRect.bottom);
-
-        return overlap || (horizontalDist < maxDistance && verticalDist < maxDistance);
-      } catch (e) {
-        return false;
-      }
-    },
-
-    /**
-     * Highlight an equation element with styles and event listeners
-     */
-    highlightEquationElement(el, commentId) {
-      el.classList.add('jal-highlight-element');
-      el.dataset.jalCommentId = commentId;
-
-      // Force inline styles for equation elements that might override CSS
-      el.style.setProperty('background', 'rgba(255, 220, 100, 0.4)', 'important');
-      el.style.setProperty('outline', '2px solid #f6ad55', 'important');
-      el.style.setProperty('outline-offset', '2px', 'important');
-      el.style.setProperty('border-radius', '4px', 'important');
-
-      // Add hover/click interaction
-      el.addEventListener('mouseenter', () => {
-        const card = document.querySelector(`.jal-comment-card[data-comment-id="${commentId}"]`);
-        if (card) card.classList.add('jal-active');
-      });
-      el.addEventListener('mouseleave', () => {
-        const card = document.querySelector(`.jal-comment-card[data-comment-id="${commentId}"]`);
-        if (card) card.classList.remove('jal-active');
-      });
-      el.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const card = document.querySelector(`.jal-comment-card[data-comment-id="${commentId}"]`);
-        if (card) {
-          card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          card.classList.add('jal-flash');
-          setTimeout(() => card.classList.remove('jal-flash'), 2000);
-        }
-      });
     },
 
     /**
@@ -1224,8 +2287,8 @@
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => JAL.init());
   } else {
-    // Wait a bit for SPAs to settle
-    setTimeout(() => JAL.init(), 1000);
+    // Wait a bit for SPAs to settle, then init
+    setTimeout(() => JAL.init(), 500);
   }
 
 })();
