@@ -386,12 +386,18 @@ window.JAL.Providers.chatgpt = {
    * Mark a message element for JAL tracking
    */
   markMessage(element) {
-    if (!element.hasAttribute('data-jal-message')) {
-      const fp = window.JAL.Utils.fingerprint(this.getMessageText(element));
-      element.setAttribute('data-jal-message', fp);
-      element.setAttribute('data-jal-provider', this.name);
+    const existingFp = element.getAttribute('data-jal-message');
+    // Update fingerprint if it doesn't exist OR if it's empty (content wasn't loaded before)
+    if (!existingFp || existingFp === '') {
+      const text = this.getMessageText(element);
+      // Only set fingerprint if we actually have content
+      if (text && text.length > 10) {
+        const fp = window.JAL.Utils.fingerprint(text);
+        element.setAttribute('data-jal-message', fp);
+        element.setAttribute('data-jal-provider', this.name);
+      }
     }
-    return element.getAttribute('data-jal-message');
+    return element.getAttribute('data-jal-message') || '';
   },
 
   /**

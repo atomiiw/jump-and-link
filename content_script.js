@@ -73,54 +73,187 @@
   };
 
   /**
-   * Start observing the composer for clear/send events
+   * Start observing for when to mark comments as "asked"
+   * Also detects when comments are removed from composer (back to draft)
+   * Uses lightweight polling - only checks when comments are pending
    */
   JAL.startComposerObserving = function() {
-    if (!JAL.state.adapter.observeComposer) return;
+    let lastAssistantCount = 0;
+    let waitingForResponse = false;
 
-    JAL.state.adapter.observeComposer((event) => {
-      if (event === 'cleared' && JAL.state.commentsInComposer.size > 0) {
-        console.log('JAL: Composer cleared, checking if sent...');
+    // Poll every 3 seconds (lightweight, doesn't affect streaming)
+    setInterval(() => {
+      // Check if any comments were removed from composer
+      JAL.checkForRemovedComments();
 
-        // Wait for the user message to appear in DOM, then check
-        // Use a longer delay and retry mechanism for reliability
-        setTimeout(() => {
-          JAL.clearComposerTracking();
-        }, 1000);
+      // Only proceed if we have comments in composer waiting to be marked
+      if (JAL.state.commentsInComposer.size === 0) {
+        waitingForResponse = false;
+        return;
       }
-    });
+
+      // Count current assistant messages
+      const currentCount = JAL.state.adapter.getAssistantMessages().length;
+
+      // If we haven't started waiting yet, record the current count
+      if (!waitingForResponse) {
+        lastAssistantCount = currentCount;
+        waitingForResponse = true;
+        console.log('JAL: Comments in composer, watching for new response...');
+        return;
+      }
+
+      // Check if a new assistant message appeared AND streaming is done
+      if (currentCount > lastAssistantCount && !JAL.isResponseStreaming()) {
+        console.log('JAL: New response complete, marking comments as asked');
+        JAL.markCommentsAsAsked();
+        waitingForResponse = false;
+        lastAssistantCount = currentCount;
+      }
+    }, 3000);
+  };
+
+  /**
+   * Check if any comments were removed from the composer and mark them as draft
+   * Only marks as draft if user manually deleted - NOT if message was sent
+   */
+  JAL.checkForRemovedComments = function() {
+    if (JAL.state.commentsInComposer.size === 0) return;
+
+    const composerContent = JAL.state.adapter.getComposerContent?.() || '';
+
+    // If composer is completely empty, poll to check if response is generating
+    if (composerContent.trim() === '') {
+      // If already waiting, don't start another check
+      if (JAL.state._waitingForEmptyCheck) return;
+
+      JAL.state._waitingForEmptyCheck = true;
+      console.log('JAL: Composer emptied, polling to detect if message was sent...');
+
+      // Record the current assistant message count
+      const initialCount = JAL.state.adapter.getAssistantMessages?.().length || 0;
+      let pollCount = 0;
+      const maxPolls = 10; // Poll up to 10 times (5 seconds total)
+
+      const pollForResponse = () => {
+        pollCount++;
+
+        // Check if streaming is happening OR if a new message appeared
+        const isStreaming = JAL.isResponseStreaming();
+        const currentCount = JAL.state.adapter.getAssistantMessages?.().length || 0;
+        const newMessageAppeared = currentCount > initialCount;
+
+        if (isStreaming || newMessageAppeared) {
+          // Message was sent! Turn green
+          console.log('JAL: Message sent detected (streaming:', isStreaming, 'new message:', newMessageAppeared, '), marking as asked (green)');
+          JAL.state._waitingForEmptyCheck = false;
+          JAL.markCommentsAsAsked();
+          return;
+        }
+
+        if (pollCount < maxPolls) {
+          // Keep polling
+          setTimeout(pollForResponse, 500);
+        } else {
+          // Timeout - no response detected, mark as draft
+          JAL.state._waitingForEmptyCheck = false;
+          console.log('JAL: No response detected after polling, marking comments as draft (orange)');
+          for (const commentId of [...JAL.state.commentsInComposer]) {
+            const comment = JAL.state.comments.find(c => c.commentId === commentId);
+            if (comment) {
+              JAL.state.commentsInComposer.delete(commentId);
+              comment.status = 'draft';
+              JAL.Storage.updateComment(commentId, { status: 'draft' });
+              JAL.UI.updateCommentVisualState(commentId, 'draft');
+            }
+          }
+        }
+      };
+
+      // Start polling after a short delay
+      setTimeout(pollForResponse, 500);
+      return;
+    }
+
+    // Check each comment in composer (when composer has content)
+    for (const commentId of [...JAL.state.commentsInComposer]) {
+      const comment = JAL.state.comments.find(c => c.commentId === commentId);
+      if (!comment) continue;
+
+      // Check if the comment's body text is still in composer
+      const bodyText = comment.body;
+
+      // Only mark as draft if comment body is not in composer
+      if (!composerContent.includes(bodyText)) {
+        console.log('JAL: Comment removed from composer, marking as draft:', commentId);
+        JAL.state.commentsInComposer.delete(commentId);
+        comment.status = 'draft';
+        JAL.Storage.updateComment(commentId, { status: 'draft' });
+        JAL.UI.updateCommentVisualState(commentId, 'draft');
+      }
+    }
+  };
+
+  /**
+   * Mark all comments in composer as "asked" (green)
+   */
+  JAL.markCommentsAsAsked = function() {
+    for (const commentId of JAL.state.commentsInComposer) {
+      const comment = JAL.state.comments.find(c => c.commentId === commentId);
+      if (comment) {
+        comment.status = 'queued';
+        JAL.Storage.updateComment(commentId, { status: 'queued' });
+        JAL.UI.updateCommentVisualState(commentId, 'asked');
+        console.log('JAL: Marked comment as asked:', commentId);
+      }
+    }
+    JAL.state.commentsInComposer.clear();
+  };
+
+  /**
+   * Check if ChatGPT is currently streaming a response
+   */
+  JAL.isResponseStreaming = function() {
+    // ChatGPT shows a "Stop generating" button while streaming
+    const stopButton = document.querySelector('button[aria-label="Stop generating"]');
+    if (stopButton) return true;
+
+    // Also check for the streaming indicator
+    const streamingCursor = document.querySelector('.result-streaming');
+    if (streamingCursor) return true;
+
+    // Check for any button with "stop" in the aria-label or text
+    const buttons = document.querySelectorAll('button[aria-label*="Stop"], button[aria-label*="stop"]');
+    if (buttons.length > 0) return true;
+
+    return false;
   };
 
   /**
    * Load comments from storage
    */
   JAL.loadComments = async function() {
-    console.log('=== JAL DEBUG: Loading Comments ===');
-    console.log('JAL DEBUG: Current URL:', window.location.href);
-    console.log('JAL DEBUG: PageId:', JAL.state.pageId);
-
     try {
       const comments = await JAL.Storage.getComments(JAL.state.pageId);
-      console.log('JAL DEBUG: Loaded', comments.length, 'comments from storage');
-      if (comments.length > 0) {
-        console.log('JAL DEBUG: First comment:', comments[0]);
-        console.log('JAL DEBUG: First comment status:', comments[0].status);
-      }
       JAL.state.comments = comments;
       JAL.UI.renderComments();
       JAL.UI.renderHighlights();
 
-      // Retry once if some highlights failed (content might still be loading)
-      const renderedCount = JAL.state.ui.highlights.size;
-      if (renderedCount < comments.length) {
-        console.log('JAL: Some highlights missing, retrying in 500ms...');
-        setTimeout(() => {
-          JAL.markAllMessages();
-          JAL.UI.renderHighlights();
-        }, 500);
-      }
+      // Retry with increasing delays if highlights are missing (content might still be loading)
+      const retryRenderHighlights = (attempt, maxAttempts, delay) => {
+        const renderedCount = JAL.state.ui.highlights.size;
+        if (renderedCount < comments.length && attempt < maxAttempts) {
+          console.log(`JAL: ${comments.length - renderedCount} highlights missing, retry ${attempt + 1}/${maxAttempts} in ${delay}ms...`);
+          setTimeout(() => {
+            JAL.markAllMessages();
+            JAL.UI.renderHighlights();
+            retryRenderHighlights(attempt + 1, maxAttempts, delay * 1.5);
+          }, delay);
+        }
+      };
+      retryRenderHighlights(0, 5, 500);
     } catch (err) {
-      console.error('JAL DEBUG: Error loading comments:', err);
+      console.error('JAL: Error loading comments:', err);
     }
   };
 
@@ -128,7 +261,7 @@
    * Wait for message content to be available (ChatGPT loads progressively)
    */
   JAL.waitForMessageContent = async function() {
-    const maxAttempts = 15;
+    const maxAttempts = 30;  // Increased for slow networks
     const delay = 100;
 
     for (let i = 0; i < maxAttempts; i++) {
@@ -170,23 +303,52 @@
       }
     });
 
-    // Handle navigation/URL changes
+    // Handle navigation/URL changes - use History API instead of MutationObserver
     let lastUrl = window.location.href;
-    new MutationObserver(() => {
+    const checkUrl = () => {
       if (window.location.href !== lastUrl) {
         lastUrl = window.location.href;
         JAL.handleUrlChange();
       }
-    }).observe(document.body, { childList: true, subtree: true });
+    };
+    window.addEventListener('popstate', checkUrl);
+    // Intercept pushState/replaceState for SPA navigation
+    const origPush = history.pushState;
+    const origReplace = history.replaceState;
+    history.pushState = function() { origPush.apply(this, arguments); checkUrl(); };
+    history.replaceState = function() { origReplace.apply(this, arguments); checkUrl(); };
   };
 
   /**
    * Handle URL changes (navigation within SPA)
+   * This runs when user clicks + for new chat or navigates between conversations
    */
   JAL.handleUrlChange = async function() {
+    console.log('JAL: URL changed, reinitializing...');
+
+    // Clear existing highlights from old conversation
+    document.querySelectorAll('.jal-highlight-overlay, .jal-underline, .jal-click-overlay').forEach(el => el.remove());
+    JAL.state.ui.highlights.clear();
+
+    // Clear old state
+    JAL.state.comments = [];
+    JAL.state.selectedComments.clear();
+    JAL.state.commentsInComposer.clear();
+
+    // Update page ID
     JAL.state.pageId = JAL.Utils.getPageId(window.location.href);
-    await JAL.loadComments();
+    console.log('JAL: New pageId:', JAL.state.pageId);
+
+    // Wait for new messages to load (ChatGPT loads content dynamically)
+    await JAL.waitForMessageContent();
+
+    // Mark new messages
     JAL.markAllMessages();
+
+    // Load comments for new page
+    await JAL.loadComments();
+
+    console.log('JAL: Reinitialized for new conversation');
   };
 
   /**
@@ -288,32 +450,11 @@
 
   /**
    * Start observing for new assistant messages
+   * DISABLED - causes performance issues during streaming
    */
   JAL.startObserving = function() {
-    if (JAL.state.isObserving) return;
-
-    JAL.state.adapter.observeNewMessages((newMessage) => {
-      // Mark the new message
-      const fp = JAL.state.adapter.markMessage(newMessage);
-
-      // If we have a pending jump, this might be the response
-      if (JAL.state.pendingJump) {
-        JAL.state.pendingJump.toBlockFp = fp;
-        JAL.state.pendingJump.toScrollY = JAL.state.adapter.getScrollPosition();
-
-        // Jump to the new message
-        setTimeout(() => {
-          JAL.Utils.scrollToElement(newMessage, 100);
-          JAL.Utils.flashHighlight(newMessage);
-        }, 500);
-
-        JAL.state.pendingJump = null;
-      }
-
-      // Re-render highlights in case any comments reference this message
-      JAL.UI.renderHighlights();
-    });
-
+    // Intentionally empty - no observers needed
+    // Comments are loaded on page load and URL change
     JAL.state.isObserving = true;
   };
 
@@ -728,28 +869,31 @@
       const input = document.getElementById('jal-comment-input');
       const textarea = document.getElementById('jal-comment-textarea');
 
-      const selection = window.getSelection();
-      if (selection && !selection.isCollapsed) {
-        const range = selection.getRangeAt(0);
-        const rect = range.getBoundingClientRect();
+      // Keep input in jal-container (not inside message) to avoid clipping
+      const jalContainer = document.getElementById('jal-container');
+      if (input.parentElement !== jalContainer) {
+        jalContainer.appendChild(input);
+      }
 
-        // Keep input in jal-container (not inside message) to avoid clipping
-        const jalContainer = document.getElementById('jal-container');
-        if (input.parentElement !== jalContainer) {
-          jalContainer.appendChild(input);
-        }
+      // Create range from anchor (this uses the expanded quoteExact, not original selection)
+      const expandedRange = JAL.Anchoring.createRangeForAnchor(anchor, messageElement);
 
-        // Use fixed positioning with viewport coordinates
-        // Position to the right of selection, clamped to viewport
-        let left = rect.right + 20;
+      if (expandedRange) {
+        const rect = expandedRange.getBoundingClientRect();
+        const inputWidth = 280; // matches CSS
+        const inputHeight = 150; // approximate
+
+        // Position to the right of the selection (same as comment popup)
+        let left = rect.right + 10;
         let top = rect.top;
 
-        // Clamp to viewport bounds
-        const inputWidth = 280; // from CSS
-        const inputHeight = 150; // approximate
+        // Flip to left side if not enough space on right
         if (left + inputWidth > window.innerWidth - 20) {
-          left = rect.left - inputWidth - 20; // flip to left side
+          left = rect.left - inputWidth - 10;
         }
+        if (left < 20) left = 20;
+
+        // Clamp to viewport bounds
         if (top + inputHeight > window.innerHeight - 20) {
           top = window.innerHeight - inputHeight - 20;
         }
@@ -757,11 +901,15 @@
 
         input.style.position = 'fixed';
         input.style.left = `${left}px`;
+        input.style.right = 'auto';
         input.style.top = `${top}px`;
 
-        // Create temporary highlight (final merged version)
-        this.pendingHighlights = this.highlightRange(range.cloneRange(), 'jal-pending');
+        // Create temporary highlight using the expanded range (covers full words/equations)
+        this.pendingHighlights = this.highlightRange(expandedRange, 'jal-pending');
       }
+
+      // Clear the original selection
+      window.getSelection().removeAllRanges();
 
       input.classList.remove('jal-hidden');
       textarea.value = '';
@@ -788,7 +936,7 @@
      */
     removePendingHighlights() {
       // Remove all pending overlay elements
-      document.querySelectorAll('.jal-highlight-overlay[data-comment-id="jal-pending"], .jal-underline[data-comment-id="jal-pending"]').forEach(el => {
+      document.querySelectorAll('.jal-highlight-overlay[data-comment-id="jal-pending"], .jal-underline[data-comment-id="jal-pending"], .jal-click-overlay[data-comment-id="jal-pending"]').forEach(el => {
         el.remove();
       });
 
@@ -805,6 +953,8 @@
 
       // Get the message element (parent of first pending highlight)
       const messageElement = pendingEls[0].parentElement;
+      // Set up stacking context so z-index -1 works (highlight behind text)
+      messageElement.style.isolation = 'isolate';
       const messageRect = messageElement.getBoundingClientRect();
 
       // Extract positions from pending highlights (these are the accurate debug rects)
@@ -822,7 +972,7 @@
       });
 
       // Remove all pending elements
-      document.querySelectorAll('.jal-highlight-overlay[data-comment-id="jal-pending"], .jal-underline[data-comment-id="jal-pending"]').forEach(el => {
+      document.querySelectorAll('.jal-highlight-overlay[data-comment-id="jal-pending"], .jal-underline[data-comment-id="jal-pending"], .jal-click-overlay[data-comment-id="jal-pending"]').forEach(el => {
         el.remove();
       });
       this.pendingHighlights = null;
@@ -886,42 +1036,22 @@
           top: ${relativeTop}px;
           width: ${lineWidth}px;
           height: ${lineHeight}px;
-          background-color: rgba(255, 220, 100, 0.5);
-          pointer-events: auto;
-          cursor: pointer;
-          z-index: 1;
-          mix-blend-mode: multiply;
+          background-color: rgba(255, 220, 100, 0.35);
+          pointer-events: none;
+          z-index: -1;
         `;
-
-        highlight.addEventListener('click', (e) => {
-          e.stopPropagation();
-          JAL.UI.showCommentPopup(commentId, e.clientX, e.clientY);
-        });
-
-        highlight.addEventListener('mouseenter', (e) => {
-          const cid = e.target.dataset.commentId;
-          document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${cid}"], .jal-underline[data-comment-id="${cid}"]`).forEach(el => {
-            el.classList.add('jal-hover');
-          });
-        });
-        highlight.addEventListener('mouseleave', (e) => {
-          const cid = e.target.dataset.commentId;
-          document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${cid}"], .jal-underline[data-comment-id="${cid}"]`).forEach(el => {
-            el.classList.remove('jal-hover');
-          });
-        });
 
         messageElement.appendChild(highlight);
         highlights.push(highlight);
 
-        // Create underline
+        // Create thin underline (visual indicator only)
         const underline = document.createElement('div');
         underline.className = 'jal-underline';
         underline.dataset.commentId = commentId;
         underline.style.cssText = `
           position: absolute;
           left: ${relativeLeft}px;
-          top: ${relativeTop + lineHeight}px;
+          top: ${relativeTop + lineHeight - 2}px;
           width: ${lineWidth}px;
           height: 2px;
           background-color: #f6ad55;
@@ -930,6 +1060,43 @@
         `;
         messageElement.appendChild(underline);
         highlights.push(underline);
+
+        // Create transparent click overlay (covers entire highlight area)
+        const clickOverlay = document.createElement('div');
+        clickOverlay.className = 'jal-click-overlay';
+        clickOverlay.dataset.commentId = commentId;
+        clickOverlay.style.cssText = `
+          position: absolute;
+          left: ${relativeLeft}px;
+          top: ${relativeTop}px;
+          width: ${lineWidth}px;
+          height: ${lineHeight}px;
+          background-color: transparent;
+          pointer-events: auto;
+          cursor: pointer;
+          z-index: 2;
+        `;
+
+        clickOverlay.addEventListener('click', (e) => {
+          e.stopPropagation();
+          JAL.UI.showCommentPopup(commentId, e.clientX, e.clientY);
+        });
+
+        clickOverlay.addEventListener('mouseenter', (e) => {
+          const cid = e.target.dataset.commentId;
+          document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${cid}"], .jal-underline[data-comment-id="${cid}"]`).forEach(el => {
+            el.classList.add('jal-hover');
+          });
+        });
+        clickOverlay.addEventListener('mouseleave', (e) => {
+          const cid = e.target.dataset.commentId;
+          document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${cid}"], .jal-underline[data-comment-id="${cid}"]`).forEach(el => {
+            el.classList.remove('jal-hover');
+          });
+        });
+
+        messageElement.appendChild(clickOverlay);
+        highlights.push(clickOverlay);
       }
 
       return highlights;
@@ -963,10 +1130,8 @@
         if (this.pendingHighlights && this.pendingHighlights.length > 0) {
           this.pendingHighlights.forEach(el => {
             el.dataset.commentId = comment.commentId;
-            // Add click handler with correct commentId
-            if (el.classList.contains('jal-highlight-overlay')) {
-              el.style.pointerEvents = 'auto';
-              el.style.cursor = 'pointer';
+            // Add click handler to click overlay elements (they handle all interactions)
+            if (el.classList.contains('jal-click-overlay')) {
               el.addEventListener('click', (e) => {
                 e.stopPropagation();
                 JAL.UI.showCommentPopup(comment.commentId, e.clientX, e.clientY);
@@ -1132,6 +1297,7 @@
       popup.innerHTML = `
         <div class="jal-popup-header">
           <span class="jal-status-badge">${statusLabel}</span>
+          <button class="jal-popup-delete-btn" title="Delete comment">🗑</button>
           <button class="jal-popup-close">&times;</button>
         </div>
         <div class="jal-popup-body">${this.escapeHtml(comment.body)}</div>
@@ -1215,6 +1381,35 @@
           JAL.addCommentToComposer(commentId);
         });
       }
+
+      // Delete button
+      const deleteBtn = popup.querySelector('.jal-popup-delete-btn');
+      deleteBtn.addEventListener('click', async () => {
+        if (confirm('Delete this comment?')) {
+          // Remove from storage
+          await JAL.Storage.deleteComment(commentId);
+
+          // Remove from state
+          const idx = JAL.state.comments.findIndex(c => c.commentId === commentId);
+          if (idx !== -1) JAL.state.comments.splice(idx, 1);
+
+          // Remove from composer set if present
+          JAL.state.commentsInComposer.delete(commentId);
+
+          // Remove highlights
+          const highlights = JAL.state.ui.highlights.get(commentId);
+          if (highlights) {
+            highlights.forEach(el => el.remove());
+            JAL.state.ui.highlights.delete(commentId);
+          }
+
+          // Close popup
+          this.hideCommentPopup();
+
+          // Re-render comments list
+          this.renderCommentsOnly();
+        }
+      });
 
       // Close on click outside
       setTimeout(() => {
@@ -1422,6 +1617,10 @@
      * Position comment cards in the margin aligned with their highlights
      */
     positionComments() {
+      // Skip if panel is hidden - no need to reposition invisible cards
+      const panel = document.getElementById('jal-panel');
+      if (!panel || panel.classList.contains('jal-hidden')) return;
+
       const list = document.getElementById('jal-comments-list');
       const cards = list.querySelectorAll('.jal-comment-card');
       const positions = [];
@@ -1462,9 +1661,6 @@
      * Render highlights for all comments
      */
     renderHighlights() {
-      console.log('=== JAL DEBUG: renderHighlights ===');
-      console.log('JAL DEBUG: Total comments to render:', JAL.state.comments.length);
-
       // Clear existing highlights
       document.querySelectorAll('mark.jal-highlight').forEach(el => {
         const parent = el.parentNode;
@@ -1476,48 +1672,31 @@
           parent.normalize();
         }
       });
-      document.querySelectorAll('.jal-highlight-overlay, .jal-underline').forEach(el => el.remove());
+      document.querySelectorAll('.jal-highlight-overlay, .jal-underline, .jal-click-overlay').forEach(el => el.remove());
       JAL.state.ui.highlights.clear();
 
       const messages = JAL.state.adapter.getAssistantMessages();
-      console.log('JAL DEBUG: Found', messages.length, 'assistant messages');
 
-      // Mark all messages NOW (ensure fingerprints exist before matching)
+      // Mark all messages (ensure fingerprints exist before matching)
       messages.forEach(msg => {
         JAL.state.adapter.markMessage(msg);
       });
 
-      // Log message fingerprints
-      messages.forEach((m, i) => {
-        const fp = m.getAttribute('data-jal-message');
-        console.log(`JAL DEBUG: Message ${i} fingerprint:`, fp);
-      });
-
       for (const comment of JAL.state.comments) {
-        console.log('JAL DEBUG: Looking for message with fingerprint:', comment.anchor.messageFingerprint);
-
         const targetMessage = messages.find(m =>
           m.getAttribute('data-jal-message') === comment.anchor.messageFingerprint
         );
 
-        if (!targetMessage) {
-          console.log('JAL DEBUG: ❌ Message NOT FOUND for comment:', comment.commentId);
-          continue;
-        }
-        console.log('JAL DEBUG: ✓ Found message for comment:', comment.commentId);
+        if (!targetMessage) continue;
 
         const range = JAL.Anchoring.createRangeForAnchor(comment.anchor, targetMessage);
-        if (!range) {
-          console.log('JAL: Could not create range for comment', comment.commentId);
-          continue;
-        }
+        if (!range) continue;
 
         const highlights = this.highlightRange(range, comment.commentId);
         JAL.state.ui.highlights.set(comment.commentId, highlights);
 
         // Set initial visual state based on comment status
         const visualState = JAL.getCommentVisualState(comment.commentId);
-        console.log('JAL DEBUG: Setting visual state for', comment.commentId, '- status:', comment.status, '-> visualState:', visualState);
         this.updateCommentVisualState(comment.commentId, visualState);
       }
 
@@ -1578,10 +1757,11 @@
           return highlights;
         }
 
-        // if (getComputedStyle(messageElement).position === 'static') {
-        //   messageElement.style.position = 'relative';
-        // }
-        // Force reflow to ensure position change is applied before measuring
+        // Set up stacking context so z-index -1 works (highlight behind text)
+        if (getComputedStyle(messageElement).position === 'static') {
+          messageElement.style.position = 'relative';
+        }
+        messageElement.style.isolation = 'isolate';
         messageElement.offsetHeight;
         const messageRect = messageElement.getBoundingClientRect();
 
@@ -1698,14 +1878,17 @@
             const text = node.textContent;
             if (!text || text.length === 0) continue;
 
-            for (let i = 0; i < text.length; i++) {
-              try {
-                if (range.comparePoint(node, i) < 0) continue;
-                if (range.comparePoint(node, i) > 0) break;
-              } catch (e) {
-                continue;
-              }
+            // Get the actual range boundaries for this node
+            let nodeStart = 0;
+            let nodeEnd = text.length;
+            if (node === range.startContainer) {
+              nodeStart = range.startOffset;
+            }
+            if (node === range.endContainer) {
+              nodeEnd = range.endOffset;
+            }
 
+            for (let i = nodeStart; i < nodeEnd; i++) {
               const charRange = document.createRange();
               charRange.setStart(node, i);
               charRange.setEnd(node, Math.min(i + 1, text.length));
@@ -1736,8 +1919,6 @@
         }
 
         if (lines.length === 0) return highlights;
-
-        console.log(`JAL DEBUG: ${lines.length} raw rects before merge`);
 
         // SIMPLE MERGE: Group segments on the SAME line (significant Y overlap), then bounding box per group
         // "Same line" = centers are close together (within half the height of smaller segment)
@@ -1781,8 +1962,6 @@
           }
         }
 
-        console.log(`JAL DEBUG: ${lines.length} lines after merge`);
-
         // Now lines contains one bounding box per line - no going over
         for (const line of lines) {
           const lineHeight = line.bottom - line.top;
@@ -1790,7 +1969,7 @@
           const relativeTop = line.top - messageRect.top;
           const relativeLeft = line.left - messageRect.left;
 
-          // Create highlight for this line
+          // Create highlight for this line (behind text, not clickable)
           const highlight = document.createElement('div');
           highlight.className = 'jal-highlight-overlay';
           highlight.dataset.commentId = commentId;
@@ -1800,44 +1979,22 @@
             top: ${relativeTop}px;
             width: ${lineWidth}px;
             height: ${lineHeight}px;
-            background-color: rgba(255, 220, 100, 0.5);
-            pointer-events: auto;
-            cursor: pointer;
-            z-index: 1;
-            mix-blend-mode: multiply;
+            background-color: rgba(255, 220, 100, 0.35);
+            pointer-events: none;
+            z-index: -1;
           `;
 
-          highlight.addEventListener('click', (e) => {
-            e.stopPropagation();
-            JAL.UI.showCommentPopup(commentId, e.clientX, e.clientY);
-          });
-
-          // Hover all lines of the same comment together
-          highlight.addEventListener('mouseenter', (e) => {
-            const cid = e.target.dataset.commentId;
-            document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${cid}"], .jal-underline[data-comment-id="${cid}"]`).forEach(el => {
-              el.classList.add('jal-hover');
-            });
-          });
-          highlight.addEventListener('mouseleave', (e) => {
-            const cid = e.target.dataset.commentId;
-            document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${cid}"], .jal-underline[data-comment-id="${cid}"]`).forEach(el => {
-              el.classList.remove('jal-hover');
-            });
-          });
-
-          // Append to message element - this is stable and scrolls with content
           messageElement.appendChild(highlight);
           highlights.push(highlight);
 
-          // Create underline at bottom of this line
+          // Create thin underline (visual indicator only)
           const underline = document.createElement('div');
           underline.className = 'jal-underline';
           underline.dataset.commentId = commentId;
           underline.style.cssText = `
             position: absolute;
             left: ${relativeLeft}px;
-            top: ${relativeTop + lineHeight}px;
+            top: ${relativeTop + lineHeight - 2}px;
             width: ${lineWidth}px;
             height: 2px;
             background-color: #f6ad55;
@@ -1846,6 +2003,43 @@
           `;
           messageElement.appendChild(underline);
           highlights.push(underline);
+
+          // Create transparent click overlay (covers entire highlight area)
+          const clickOverlay = document.createElement('div');
+          clickOverlay.className = 'jal-click-overlay';
+          clickOverlay.dataset.commentId = commentId;
+          clickOverlay.style.cssText = `
+            position: absolute;
+            left: ${relativeLeft}px;
+            top: ${relativeTop}px;
+            width: ${lineWidth}px;
+            height: ${lineHeight}px;
+            background-color: transparent;
+            pointer-events: auto;
+            cursor: pointer;
+            z-index: 2;
+          `;
+
+          clickOverlay.addEventListener('click', (e) => {
+            e.stopPropagation();
+            JAL.UI.showCommentPopup(commentId, e.clientX, e.clientY);
+          });
+
+          clickOverlay.addEventListener('mouseenter', (e) => {
+            const cid = e.target.dataset.commentId;
+            document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${cid}"], .jal-underline[data-comment-id="${cid}"]`).forEach(el => {
+              el.classList.add('jal-hover');
+            });
+          });
+          clickOverlay.addEventListener('mouseleave', (e) => {
+            const cid = e.target.dataset.commentId;
+            document.querySelectorAll(`.jal-highlight-overlay[data-comment-id="${cid}"], .jal-underline[data-comment-id="${cid}"]`).forEach(el => {
+              el.classList.remove('jal-hover');
+            });
+          });
+
+          messageElement.appendChild(clickOverlay);
+          highlights.push(clickOverlay);
         }
       } catch (e) {
         console.error('JAL highlightRange error:', e);
@@ -1871,6 +2065,7 @@
         if (getComputedStyle(messageElement).position === 'static') {
           messageElement.style.position = 'relative';
         }
+        messageElement.style.isolation = 'isolate';
         messageElement.offsetHeight;
         const messageRect = messageElement.getBoundingClientRect();
 
@@ -2024,8 +2219,6 @@
           }
         }
 
-        console.log(`JAL DEBUG: found ${charRects.length} rects (${processedEquations.size} full equations)`);
-
         // Fallback to getClientRects if no character rects found
         let lines = charRects;
         if (lines.length === 0) {
@@ -2066,16 +2259,13 @@
             height: ${lineHeight}px;
             background-color: ${color};
             pointer-events: none;
-            z-index: 1;
-            mix-blend-mode: multiply;
+            z-index: -1;
             border: 1px solid rgba(0,0,0,0.3);
           `;
 
           messageElement.appendChild(highlight);
           highlights.push(highlight);
         });
-
-        console.log(`JAL DEBUG: ${lines.length} raw character rects detected`);
 
       } catch (e) {
         console.error('JAL highlightRangeUnmerged error:', e);
@@ -2086,58 +2276,37 @@
 
     /**
      * Setup resize and scroll handlers for repositioning comments
+     * NOTE: Scroll handler disabled to prevent performance issues during streaming
      */
     setupPositionHandlers() {
       if (this._positionHandlersSetup) return;
       this._positionHandlersSetup = true;
 
-      // Reposition function (called on scroll - needs to be fast)
-      const repositionNow = () => {
-        this.positionComments();
-      };
-
-      // Debounced reposition for less frequent events
-      let repositionTimeout;
-      const debouncedReposition = () => {
-        clearTimeout(repositionTimeout);
-        repositionTimeout = setTimeout(() => {
-          this.positionComments();
-        }, 100);
-      };
-
-      // Reposition on window resize
-      window.addEventListener('resize', debouncedReposition);
-
-      // Reposition on scroll - use requestAnimationFrame for smooth scrolling
-      let scrollTicking = false;
-      const handleScroll = () => {
-        if (!scrollTicking) {
-          requestAnimationFrame(() => {
-            repositionNow();
-            scrollTicking = false;
-          });
-          scrollTicking = true;
-        }
-      };
-
-      // Listen to scroll on window
-      window.addEventListener('scroll', handleScroll, { passive: true });
-
-      // Also listen to scroll on the ChatGPT scroll container
-      const scrollContainer = this.findScrollContainer();
-      if (scrollContainer && scrollContainer !== window) {
-        scrollContainer.addEventListener('scroll', handleScroll, { passive: true });
-      }
-
-      // Also observe mutations in the main content area
-      // (for when messages load/change)
-      const mainContent = document.body;
-      const observer = new MutationObserver(debouncedReposition);
-      observer.observe(mainContent, {
-        childList: true,
-        subtree: true,
-        characterData: true
+      // Debounced reposition for resize only
+      let resizeTimeout;
+      window.addEventListener('resize', () => {
+        clearTimeout(resizeTimeout);
+        resizeTimeout = setTimeout(() => this.positionComments(), 150);
       });
+
+      // DISABLED: Scroll handler causes performance issues during ChatGPT streaming
+      // The scroll handler was calling positionComments() which forces layout recalculation
+      // via getBoundingClientRect() on every highlight element, blocking the main thread.
+      //
+      // TODO: Re-enable with streaming detection if comment repositioning during scroll is needed
+      // let lastScrollTime = 0;
+      // const handleScroll = () => {
+      //   const now = Date.now();
+      //   if (now - lastScrollTime < 100) return;
+      //   lastScrollTime = now;
+      //   requestAnimationFrame(() => this.positionComments());
+      // };
+      // const scrollContainer = this.findScrollContainer();
+      // if (scrollContainer) {
+      //   scrollContainer.addEventListener('scroll', handleScroll, { passive: true });
+      // }
+
+      console.log('JAL: Position handlers setup (scroll handler disabled for performance)');
     },
 
     /**

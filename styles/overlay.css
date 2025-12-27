@@ -73,8 +73,8 @@
 
 .jal-comment-popup .jal-popup-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 8px;
   margin-bottom: 8px;
   padding-bottom: 8px;
   border-bottom: 1px solid #e2e8f0;
@@ -88,6 +88,27 @@
   border-radius: 4px;
   background: #feebc8;
   color: #c05621;
+}
+
+.jal-comment-popup .jal-popup-delete-btn {
+  background: none;
+  border: none;
+  font-size: 14px;
+  cursor: pointer;
+  color: #999;
+  padding: 2px;
+  line-height: 1;
+  opacity: 0.7;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.jal-comment-popup .jal-popup-delete-btn:hover {
+  opacity: 1;
+  color: #e53e3e;
+}
+
+.jal-comment-popup .jal-popup-close {
+  margin-left: auto;
 }
 
 /* Visual state colors for popup badge */
@@ -138,14 +159,16 @@
   border: none;
   background: #f7f7f7;
   color: #666;
-  font-size: 18px;
-  font-weight: 400;
+  font-size: 20px;
+  font-weight: 300;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   transition: all 0.15s ease;
-  line-height: 1;
+  line-height: 0;
+  padding: 0;
+  padding-bottom: 2px;
 }
 
 .jal-popup-add-btn:hover:not(.jal-disabled) {
@@ -542,11 +565,13 @@
 }
 
 /* Highlight overlays - clickable to show comment */
+/* NOTE: mix-blend-mode removed - causes expensive GPU compositing during streaming */
+/* z-index: -1 puts highlight behind text (requires parent to have isolation: isolate) */
 .jal-highlight-overlay {
   pointer-events: auto;
   cursor: pointer;
-  z-index: 1;
-  mix-blend-mode: multiply;
+  z-index: -1;
+  /* mix-blend-mode: multiply; */
   transition: background-color 0.15s ease;
 }
 
@@ -570,9 +595,10 @@
   background-color: rgba(60, 180, 110, 0.7) !important;
 }
 
-/* Underline overlays - at bottom of highlights */
+/* Underline overlays - clickable, handles all interactions */
 .jal-underline {
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: pointer;
   z-index: 1;
   transition: background-color 0.15s ease;
 }
@@ -593,6 +619,15 @@
 .jal-underline[data-visual-state="asked"].jal-hover {
   background-color: #276749 !important;
 }
+
+/* Click overlay - transparent layer on top of text for click handling */
+.jal-click-overlay {
+  pointer-events: auto;
+  cursor: pointer;
+  z-index: 1;
+}
+
+/* Click overlay doesn't need visual hover states - the underlying highlight shows them */
 
 /* Comment card active state when hovering its highlight */
 .jal-comment-card.jal-active {
