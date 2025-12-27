@@ -1578,9 +1578,9 @@
           return highlights;
         }
 
-        if (getComputedStyle(messageElement).position === 'static') {
-          messageElement.style.position = 'relative';
-        }
+        // if (getComputedStyle(messageElement).position === 'static') {
+        //   messageElement.style.position = 'relative';
+        // }
         // Force reflow to ensure position change is applied before measuring
         messageElement.offsetHeight;
         const messageRect = messageElement.getBoundingClientRect();
