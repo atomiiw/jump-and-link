@@ -191,6 +191,31 @@
   color: #a0aec0;
 }
 
+/* Go-to button - shown in asked state, navigates to user message */
+.jal-popup-goto-btn {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: #48bb78;
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  padding: 0;
+}
+
+.jal-popup-goto-btn:hover {
+  background: #38a169;
+  transform: scale(1.1);
+}
+
 /* Edit button - positioned bottom left */
 .jal-popup-edit-btn {
   position: absolute;
@@ -709,6 +734,99 @@
 
   .jal-comment-input textarea:focus {
     border-color: #667eea;
+  }
+}
+
+/* ===== Quote Highlight in User Messages ===== */
+/* Wrapper for selection quotes in user messages - yellow highlight bar like assistant highlights */
+.jal-quote-highlight {
+  position: relative !important;
+  cursor: pointer !important;
+  display: inline !important;
+  border-radius: 2px !important;
+  pointer-events: auto !important;
+  /* Yellow highlight bar background - visible on hover */
+  background-color: transparent !important;
+  transition: background-color 0.15s ease !important;
+}
+
+/* Hover state - yellow highlight bar (like assistant message highlights) */
+.jal-quote-highlight:hover {
+  background-color: rgba(255, 220, 100, 0.5) !important;
+}
+
+/* Click box effect - glowing white-yellow border that fades in then out */
+/* Keep highlight visible even when mouse leaves during animation */
+.jal-quote-highlight.jal-quote-clicked {
+  background-color: rgba(255, 220, 100, 0.5) !important;
+  animation: jal-quote-click-fade 0.8s ease-in-out forwards !important;
+}
+
+@keyframes jal-quote-click-fade {
+  0% {
+    background-color: rgba(255, 220, 100, 0.5);
+    box-shadow:
+      0 0 0 0px rgba(255, 255, 220, 0),
+      0 0 0px rgba(255, 255, 200, 0),
+      0 0 0px rgba(255, 250, 180, 0);
+  }
+  40% {
+    background-color: rgb(255, 250, 180);
+    box-shadow:
+      0 0 0 2px rgb(255, 245, 160),
+      0 0 8px rgb(255, 240, 140),
+      0 0 16px rgba(255, 235, 120, 0.8);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow:
+      0 0 0 0px rgba(255, 255, 220, 0),
+      0 0 0px rgba(255, 255, 200, 0),
+      0 0 0px rgba(255, 250, 180, 0);
+  }
+}
+
+/* Arrived animation - longer, more prominent glow when jumping to quote */
+.jal-quote-highlight.jal-quote-arrived {
+  background-color: rgba(255, 220, 100, 0.6) !important;
+  animation: jal-quote-arrived-glow 2s ease-in-out forwards !important;
+}
+
+@keyframes jal-quote-arrived-glow {
+  0% {
+    background-color: rgba(255, 220, 100, 0.6);
+    box-shadow:
+      0 0 0 3px rgba(255, 200, 50, 0.9),
+      0 0 12px rgba(255, 220, 100, 0.8),
+      0 0 24px rgba(255, 200, 50, 0.5);
+  }
+  20% {
+    background-color: rgba(255, 240, 150, 0.8);
+    box-shadow:
+      0 0 0 4px rgba(255, 220, 80, 1),
+      0 0 16px rgba(255, 230, 120, 0.9),
+      0 0 32px rgba(255, 210, 60, 0.6);
+  }
+  50% {
+    background-color: rgba(255, 240, 150, 0.8);
+    box-shadow:
+      0 0 0 4px rgba(255, 220, 80, 1),
+      0 0 16px rgba(255, 230, 120, 0.9),
+      0 0 32px rgba(255, 210, 60, 0.6);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow:
+      0 0 0 0px rgba(255, 200, 50, 0),
+      0 0 0px rgba(255, 220, 100, 0),
+      0 0 0px rgba(255, 200, 50, 0);
+  }
+}
+
+/* Dark mode adjustments for quote highlights */
+@media (prefers-color-scheme: dark) {
+  .jal-quote-highlight:hover {
+    background-color: rgba(255, 220, 100, 0.4) !important;
   }
 }
 

@@ -60,6 +60,9 @@
     // Load existing comments (now messages have fingerprints to match against)
     await JAL.loadComments();
 
+    // Process user messages to highlight selection quotes (depends on comments being loaded)
+    JAL.processUserMessageQuotes();
+
     // Setup event listeners
     JAL.setupEventListeners();
 
@@ -196,18 +199,162 @@
 
   /**
    * Mark all comments in composer as "asked" (green)
+   * Stores correlation data: user message index and fingerprint for "go to" navigation
    */
   JAL.markCommentsAsAsked = function() {
+    // Get the latest user message for "go to" feature
+    const userMessages = JAL.state.adapter.getUserMessages();
+    const askedInMessageIndex = userMessages.length; // 1-based index (last message)
+    const latestUserMessage = userMessages[userMessages.length - 1];
+    const askedInMessageId = latestUserMessage ?
+      JAL.state.adapter.markMessage(latestUserMessage) : null;
+
     for (const commentId of JAL.state.commentsInComposer) {
       const comment = JAL.state.comments.find(c => c.commentId === commentId);
       if (comment) {
         comment.status = 'queued';
-        JAL.Storage.updateComment(commentId, { status: 'queued' });
+        comment.askedInMessageIndex = askedInMessageIndex;
+        comment.askedInMessageId = askedInMessageId; // Keep fingerprint as backup
+        JAL.Storage.updateComment(commentId, {
+          status: 'queued',
+          askedInMessageIndex: askedInMessageIndex,
+          askedInMessageId: askedInMessageId
+        });
         JAL.UI.updateCommentVisualState(commentId, 'asked');
-        console.log('JAL: Marked comment as asked:', commentId);
+        console.log('JAL: Marked comment as asked:', commentId, 'in user message #' + askedInMessageIndex);
       }
     }
     JAL.state.commentsInComposer.clear();
+
+    // Re-process user messages to highlight the newly asked quotes
+    JAL.processUserMessageQuotes();
+  };
+
+  /**
+   * Scroll to the user message where this comment was asked
+   */
+  JAL.scrollToAskedMessage = function(commentId) {
+    const comment = JAL.state.comments.find(c => c.commentId === commentId);
+    if (!comment) {
+      console.log('JAL: Comment not found');
+      return;
+    }
+
+    const userMessages = JAL.state.adapter.getUserMessages();
+    let targetMessage = null;
+
+    // Try to find by index first (more reliable)
+    if (comment.askedInMessageIndex && comment.askedInMessageIndex > 0) {
+      const idx = comment.askedInMessageIndex - 1; // Convert to 0-based
+      if (idx < userMessages.length) {
+        targetMessage = userMessages[idx];
+      }
+    }
+
+    // Fallback to fingerprint matching if index didn't work
+    if (!targetMessage && comment.askedInMessageId) {
+      for (const msg of userMessages) {
+        const fp = JAL.state.adapter.markMessage(msg);
+        if (fp === comment.askedInMessageId) {
+          targetMessage = msg;
+          break;
+        }
+      }
+    }
+
+    if (!targetMessage) {
+      console.log('JAL: Could not find asked message. Index:', comment.askedInMessageIndex, 'ID:', comment.askedInMessageId);
+      return;
+    }
+
+    // Find the quote highlight element in this user message
+    const quoteHighlight = targetMessage.querySelector(`.jal-quote-highlight[data-comment-id="${commentId}"]`);
+
+    if (quoteHighlight) {
+      // Scroll to the quote element itself for better positioning
+      quoteHighlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+      // Wait for scroll to complete before starting animation
+      setTimeout(() => {
+        // Trigger the yellow glow animation on the quote
+        quoteHighlight.classList.remove('jal-quote-clicked');
+        void quoteHighlight.offsetWidth; // Force reflow
+        quoteHighlight.classList.add('jal-quote-arrived');
+
+        setTimeout(() => {
+          quoteHighlight.classList.remove('jal-quote-arrived');
+        }, 2000);
+      }, 600); // Wait for scroll to finish
+    } else {
+      // Fallback: scroll to message if quote not found
+      targetMessage.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    // Close the popup
+    JAL.UI.hideCommentPopup();
+    console.log('JAL: Scrolled to user message #' + comment.askedInMessageIndex);
+  };
+
+  /**
+   * Scroll to the source assistant message where this quote was originally highlighted
+   */
+  JAL.scrollToSourceMessage = function(commentId) {
+    const comment = JAL.state.comments.find(c => c.commentId === commentId);
+    if (!comment) {
+      console.log('JAL: Comment not found');
+      return;
+    }
+
+    const assistantMessages = JAL.state.adapter.getAssistantMessages();
+    let targetMessage = null;
+
+    // Find by source message index
+    if (comment.sourceMessageIndex && comment.sourceMessageIndex > 0) {
+      const idx = comment.sourceMessageIndex - 1; // Convert to 0-based
+      if (idx < assistantMessages.length) {
+        targetMessage = assistantMessages[idx];
+      }
+    }
+
+    // Fallback: find by message fingerprint from anchor
+    if (!targetMessage && comment.anchor && comment.anchor.messageFingerprint) {
+      for (const msg of assistantMessages) {
+        const fp = JAL.state.adapter.markMessage(msg);
+        if (fp === comment.anchor.messageFingerprint) {
+          targetMessage = msg;
+          break;
+        }
+      }
+    }
+
+    if (!targetMessage) {
+      console.log('JAL: Could not find source message. Index:', comment.sourceMessageIndex);
+      return;
+    }
+
+    // Scroll to this message
+    targetMessage.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    // Briefly highlight the message
+    targetMessage.style.outline = '2px solid #48bb78';
+    targetMessage.style.outlineOffset = '4px';
+    targetMessage.style.borderRadius = '8px';
+    setTimeout(() => {
+      targetMessage.style.outline = '';
+      targetMessage.style.outlineOffset = '';
+      targetMessage.style.borderRadius = '';
+    }, 2000);
+
+    // Also flash the original highlight if it exists
+    const highlights = JAL.state.ui.highlights.get(commentId);
+    if (highlights) {
+      highlights.forEach(el => {
+        el.classList.add('jal-hover');
+        setTimeout(() => el.classList.remove('jal-hover'), 2000);
+      });
+    }
+
+    console.log('JAL: Scrolled to source assistant message #' + comment.sourceMessageIndex);
   };
 
   /**
@@ -348,6 +495,9 @@
     // Load comments for new page
     await JAL.loadComments();
 
+    // Process user messages to highlight selection quotes (depends on comments being loaded)
+    JAL.processUserMessageQuotes();
+
     console.log('JAL: Reinitialized for new conversation');
   };
 
@@ -415,6 +565,10 @@
     // Ensure message is marked
     JAL.state.adapter.markMessage(container);
 
+    // Calculate source message index (1-based)
+    const assistantMessages = JAL.state.adapter.getAssistantMessages();
+    const sourceMessageIndex = assistantMessages.indexOf(container) + 1;
+
     const messageText = JAL.state.adapter.getMessageText(container);
     const anchor = JAL.Anchoring.createAnchor(selection, container, messageText);
 
@@ -423,8 +577,8 @@
       return;
     }
 
-    // Show comment input UI
-    JAL.UI.showCommentInput(anchor, container);
+    // Show comment input UI with source index
+    JAL.UI.showCommentInput(anchor, container, sourceMessageIndex);
   };
 
   /**
@@ -456,6 +610,253 @@
     // Intentionally empty - no observers needed
     // Comments are loaded on page load and URL change
     JAL.state.isObserving = true;
+  };
+
+  /**
+   * Process user messages to highlight selection quotes from stored comments
+   * Only highlights quotes that exist in the comments storage with askedInMessageIndex
+   */
+  JAL.processUserMessageQuotes = function() {
+    const adapter = JAL.state.adapter;
+    if (!adapter || !adapter.getUserMessages) return;
+
+    // Clear any existing quote highlights first
+    document.querySelectorAll('.jal-quote-highlight').forEach(el => {
+      // Unwrap the span, keeping the text
+      const text = el.textContent;
+      el.replaceWith(document.createTextNode(text));
+    });
+
+    const userMessages = adapter.getUserMessages();
+    console.log('JAL Quote Debug: Found', userMessages.length, 'user messages');
+    console.log('JAL Quote Debug: Total comments:', JAL.state.comments.length);
+
+    // Debug: show all comments and their askedInMessageIndex
+    JAL.state.comments.forEach((c, i) => {
+      console.log('JAL Quote Debug: Comment', i, '- askedInMessageIndex:', c.askedInMessageIndex, '- quoteExact:', c.anchor?.quoteExact?.substring(0, 30));
+    });
+
+    // Get comments that have been asked (sent in user messages)
+    const askedComments = JAL.state.comments.filter(c =>
+      c.askedInMessageIndex && c.anchor && c.anchor.quoteExact
+    );
+
+    if (askedComments.length === 0) {
+      console.log('JAL: No asked comments to highlight in user messages');
+      return;
+    }
+
+    console.log('JAL: Processing', askedComments.length, 'asked comments for user message quotes');
+
+    // Group comments by their user message index
+    const commentsByMessageIndex = {};
+    askedComments.forEach(comment => {
+      const idx = comment.askedInMessageIndex;
+      if (!commentsByMessageIndex[idx]) {
+        commentsByMessageIndex[idx] = [];
+      }
+      commentsByMessageIndex[idx].push(comment);
+    });
+
+    // Process each user message that has comments
+    Object.keys(commentsByMessageIndex).forEach(msgIndexStr => {
+      const msgIndex = parseInt(msgIndexStr, 10);
+      const comments = commentsByMessageIndex[msgIndex];
+
+      // Get the user message element (convert 1-based to 0-based index)
+      const msgElement = userMessages[msgIndex - 1];
+      if (!msgElement) {
+        console.log('JAL: User message not found at index', msgIndex);
+        return;
+      }
+
+      console.log('JAL Quote Debug: User message', msgIndex, 'element:', msgElement);
+      console.log('JAL Quote Debug: User message text preview:', msgElement.textContent?.substring(0, 200));
+
+      // Get all quote texts to highlight in this message
+      const quotesToHighlight = comments.map(c => c.anchor.quoteExact);
+      console.log('JAL Quote Debug: Looking for quotes:', quotesToHighlight);
+
+      // Highlight each quote in this message
+      JAL.highlightQuotesInUserMessage(msgElement, quotesToHighlight, comments);
+    });
+  };
+
+  /**
+   * Highlight specific quotes in a user message element
+   */
+  JAL.highlightQuotesInUserMessage = function(element, quotes, comments) {
+    // Normalize whitespace for matching
+    const normalize = (text) => text ? text.replace(/\s+/g, ' ').trim() : '';
+
+    // Get all text nodes
+    const walker = document.createTreeWalker(
+      element,
+      NodeFilter.SHOW_TEXT,
+      null,
+      false
+    );
+
+    const textNodes = [];
+    let node;
+    while (node = walker.nextNode()) {
+      if (node.textContent.trim()) {
+        textNodes.push(node);
+      }
+    }
+
+    // For each quote, find and wrap it in the text nodes
+    quotes.forEach((quoteExact, idx) => {
+      const normalizedQuote = normalize(quoteExact);
+      const comment = comments[idx];
+
+      // Search through text nodes to find the quote
+      // We need to find the quote in the →"..." pattern, not in the 【...】 context
+      for (let i = 0; i < textNodes.length; i++) {
+        const textNode = textNodes[i];
+        const text = textNode.textContent;
+        const normalizedText = normalize(text);
+
+        // Check if this text node contains the quote
+        const quoteIndex = normalizedText.indexOf(normalizedQuote);
+        if (quoteIndex === -1) continue;
+
+        // Find the actual position in the original text
+        // Look for the quote after →" pattern (the actual quote line, not context)
+        let originalIndex = -1;
+
+        // Method 1: Look for →"quote pattern
+        const arrowQuotePattern = '→"' + quoteExact;
+        const arrowIndex = text.indexOf(arrowQuotePattern);
+        if (arrowIndex !== -1) {
+          originalIndex = arrowIndex + 2; // Skip →"
+        }
+
+        // Method 2: Look for any →" and check if quote follows
+        if (originalIndex === -1) {
+          let searchStart = 0;
+          while (searchStart < text.length) {
+            const arrowPos = text.indexOf('→"', searchStart);
+            if (arrowPos === -1) break;
+
+            const afterArrow = text.substring(arrowPos + 2);
+            if (afterArrow.startsWith(quoteExact) || normalize(afterArrow).startsWith(normalizedQuote)) {
+              originalIndex = arrowPos + 2;
+              break;
+            }
+            searchStart = arrowPos + 2;
+          }
+        }
+
+        // Method 3: Fallback to general position finding (skip if in 【】 context)
+        if (originalIndex === -1) {
+          const fallbackIndex = JAL.findOriginalPosition(text, normalizedQuote);
+          // Only use fallback if not inside 【】 brackets
+          if (fallbackIndex !== -1) {
+            const beforeMatch = text.substring(0, fallbackIndex);
+            const openBrackets = (beforeMatch.match(/【/g) || []).length;
+            const closeBrackets = (beforeMatch.match(/】/g) || []).length;
+            // If not inside brackets (equal number of open/close before this point)
+            if (openBrackets === closeBrackets) {
+              originalIndex = fallbackIndex;
+            }
+          }
+        }
+
+        if (originalIndex === -1) continue;
+
+        // Split the text node and wrap the quote
+        const beforeText = text.substring(0, originalIndex);
+        const quoteText = text.substring(originalIndex, originalIndex + quoteExact.length);
+        const afterText = text.substring(originalIndex + quoteExact.length);
+
+        // Create the highlight span
+        const span = document.createElement('span');
+        span.className = 'jal-quote-highlight';
+        span.textContent = quoteText;
+        span.dataset.commentId = comment.commentId;
+        span.dataset.quoteText = quoteExact;
+
+        // Add click handler with fade effect and jump to source
+        span.addEventListener('click', (e) => {
+          e.stopPropagation();
+
+          // Remove any existing clicked state and re-add for animation
+          span.classList.remove('jal-quote-clicked');
+          // Force reflow to restart animation
+          void span.offsetWidth;
+          span.classList.add('jal-quote-clicked');
+
+          // Remove the class after animation completes
+          setTimeout(() => {
+            span.classList.remove('jal-quote-clicked');
+          }, 800);
+
+          // Jump back to the source assistant message where this quote was highlighted
+          JAL.scrollToSourceMessage(comment.commentId);
+
+          console.log('JAL: Quote clicked, jumping to source:', quoteExact.substring(0, 30) + '...');
+        });
+
+        // Create fragment with before, span, and after
+        const fragment = document.createDocumentFragment();
+        if (beforeText) fragment.appendChild(document.createTextNode(beforeText));
+        fragment.appendChild(span);
+        if (afterText) fragment.appendChild(document.createTextNode(afterText));
+
+        // Replace the text node
+        textNode.parentNode.replaceChild(fragment, textNode);
+
+        // Update textNodes array since we modified the DOM
+        // The afterText becomes a new text node that might contain more quotes
+        if (afterText) {
+          textNodes[i] = fragment.lastChild;
+        }
+
+        console.log('JAL: Highlighted quote in user message:', quoteExact.substring(0, 30) + '...');
+        break; // Found and highlighted this quote, move to next
+      }
+    });
+  };
+
+  /**
+   * Find the position of a normalized quote in the original text
+   */
+  JAL.findOriginalPosition = function(originalText, normalizedQuote) {
+    // Try exact match first
+    const exactIndex = originalText.indexOf(normalizedQuote);
+    if (exactIndex !== -1) return exactIndex;
+
+    // Try to find by normalizing and tracking positions
+    const normalize = (text) => text.replace(/\s+/g, ' ').trim();
+    const normalizedOriginal = normalize(originalText);
+
+    const normalizedIndex = normalizedOriginal.indexOf(normalizedQuote);
+    if (normalizedIndex === -1) return -1;
+
+    // Map the normalized index back to original
+    let origPos = 0;
+    let normPos = 0;
+
+    // Skip leading whitespace
+    while (origPos < originalText.length && /\s/.test(originalText[origPos])) {
+      origPos++;
+    }
+
+    while (normPos < normalizedIndex && origPos < originalText.length) {
+      if (/\s/.test(originalText[origPos])) {
+        // Collapse whitespace
+        while (origPos < originalText.length && /\s/.test(originalText[origPos])) {
+          origPos++;
+        }
+        normPos++;
+      } else {
+        origPos++;
+        normPos++;
+      }
+    }
+
+    return origPos;
   };
 
   /**
@@ -862,9 +1263,10 @@
     /**
      * Show comment input near anchor
      */
-    showCommentInput(anchor, messageElement) {
+    showCommentInput(anchor, messageElement, sourceMessageIndex = 0) {
       this.pendingAnchor = anchor;
       this.pendingMessage = messageElement;
+      this.pendingSourceIndex = sourceMessageIndex;
 
       const input = document.getElementById('jal-comment-input');
       const textarea = document.getElementById('jal-comment-textarea');
@@ -1123,6 +1525,9 @@
           { status: 'draft' }
         );
 
+        // Store the source message index (which assistant response this quote is from)
+        comment.sourceMessageIndex = this.pendingSourceIndex || 0;
+
         await JAL.Storage.saveComment(comment);
         JAL.state.comments.push(comment);
 
@@ -1287,7 +1692,11 @@
       // Tooltip for add button
       let addTooltip = 'Add to chat';
       if (isInComposer) addTooltip = 'Already in chat';
-      else if (isAsked) addTooltip = 'Already asked - edit to ask again';
+
+      // Determine which button to show: go-to (asked) or add (draft/added)
+      const addButtonHtml = isAsked
+        ? `<button class="jal-popup-goto-btn" title="Go to asked message">➜</button>`
+        : `<button class="jal-popup-add-btn ${!canAdd ? 'jal-disabled' : ''}" title="${addTooltip}" ${!canAdd ? 'disabled' : ''}>+</button>`;
 
       // Create popup
       const popup = document.createElement('div');
@@ -1302,7 +1711,7 @@
         </div>
         <div class="jal-popup-body">${this.escapeHtml(comment.body)}</div>
         <button class="jal-popup-edit-btn ${!canEdit ? 'jal-disabled' : ''}" title="${!canEdit ? 'Cannot edit while in chat' : 'Edit comment'}" ${!canEdit ? 'disabled' : ''}>✎</button>
-        <button class="jal-popup-add-btn ${!canAdd ? 'jal-disabled' : ''}" title="${addTooltip}" ${!canAdd ? 'disabled' : ''}>+</button>
+        ${addButtonHtml}
       `;
 
       // Use fixed positioning so popup follows the highlight on scroll
@@ -1376,9 +1785,18 @@
 
       // Add to composer button (only if draft)
       const addBtn = popup.querySelector('.jal-popup-add-btn');
-      if (canAdd) {
+      if (canAdd && addBtn) {
         addBtn.addEventListener('click', () => {
           JAL.addCommentToComposer(commentId);
+        });
+      }
+
+      // Go-to button (only in asked state)
+      const gotoBtn = popup.querySelector('.jal-popup-goto-btn');
+      if (gotoBtn) {
+        gotoBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          JAL.scrollToAskedMessage(commentId);
         });
       }
 
@@ -1428,6 +1846,7 @@
       const body = popup.querySelector('.jal-popup-body');
       const editBtn = popup.querySelector('.jal-popup-edit-btn');
       const addBtn = popup.querySelector('.jal-popup-add-btn');
+      const gotoBtn = popup.querySelector('.jal-popup-goto-btn');
 
       // Add edit mode class to reduce bottom padding
       popup.classList.add('jal-edit-mode');
@@ -1440,9 +1859,10 @@
       textarea.focus();
       textarea.select();
 
-      // Hide edit and add buttons, show save/cancel
-      editBtn.style.display = 'none';
-      addBtn.style.display = 'none';
+      // Hide all action buttons (edit, add, goto), show save/cancel
+      if (editBtn) editBtn.style.display = 'none';
+      if (addBtn) addBtn.style.display = 'none';
+      if (gotoBtn) gotoBtn.style.display = 'none';
 
       const actions = document.createElement('div');
       actions.className = 'jal-popup-edit-actions';
